@@ -17,8 +17,8 @@ Full context:
 - **LLM:** OpenRouter (`OPENROUTER_MODEL` in `.env`) — do not hardcode any model
 - **Slack:** Slack Bolt for Python, Socket Mode
 - **Database:** PostgreSQL (session state, edit history, workflow phase)
-- **Hosting:** Hostinger VPS, systemd process
-- **Deploy:** git pull from GitHub, restart systemd service
+- **Hosting:** Railway (one account, one service per app)
+- **Deploy:** Push to GitHub → Railway auto-deploys
 
 ---
 
@@ -70,11 +70,29 @@ Full context:
 # Install dependencies
 pip install -r requirements.txt
 
-# Run
+# Run locally
 python src/main.py
 ```
 
 The app connects to Slack via Socket Mode — no inbound webhook or nginx needed.
+
+## Deployment
+
+This app runs on Railway. There is no server to SSH into.
+
+- Environment variables are set in the Railway dashboard (not in a `.env` file on the server)
+- PostgreSQL is a Railway add-on — `DATABASE_URL` is injected automatically
+- Deploy by pushing to the `main` branch on GitHub — Railway picks it up automatically
+- Logs are visible in the Railway dashboard
+
+Railway requires a `Procfile` or `railway.toml` in the repo root to know how to start the app:
+
+```
+# Procfile
+worker: python src/main.py
+```
+
+Use `worker` not `web` — this app has no HTTP server, it connects to Slack via WebSocket.
 
 ---
 
