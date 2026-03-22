@@ -133,6 +133,16 @@ Each phase's completion promise must match what's in the prompt exactly:
 
 ---
 
+## Observability
+
+Sentry is initialized in `src/main.py` before anything else runs. Never remove it.
+
+Every agent must log to the `agent_logs` table on start and completion — including failures. Every rep interaction must log to `workflow_events`. No silent failures anywhere in the codebase — if an integration returns nothing, log it and surface it to the rep.
+
+See `docs/observability.md` for the full signal map and log schema.
+
+---
+
 ## Session State (PostgreSQL)
 
 Session state persists across agent calls. Key tables:
