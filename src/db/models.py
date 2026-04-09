@@ -31,6 +31,8 @@ class Persona(Base):
 
     id = Column(String, primary_key=True, default=generate_uuid)
     session_id = Column(String, nullable=False)
+    apollo_id = Column(String)
+    status = Column(String, default="discovered")    # discovered | approved | rejected
     first_name = Column(String)
     last_name = Column(String)
     title = Column(String)

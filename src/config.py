@@ -18,6 +18,9 @@ class Settings:
     # HubSpot
     HUBSPOT_ACCESS_TOKEN: str = os.getenv("HUBSPOT_ACCESS_TOKEN", "")
 
+    # Apollo
+    APOLLO_API_KEY: str = os.getenv("APOLLO_API_KEY", "")
+
     # Clay
     CLAY_API_KEY: str = os.getenv("CLAY_API_KEY", "")
 
