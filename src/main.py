@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 
@@ -12,6 +13,9 @@ from src.agents.normalizer import InputNormalizerAgent, RepRequest
 from src.agents.discovery import PersonaDiscoveryAgent
 from src.agents.scorer import ScorerAgent
 from src.agents.generator import SequenceGeneratorAgent
+from src.agents.editor import SequenceEditorAgent
+from src.integrations.exa import ExaClient
+from src.integrations.google_drive import GoogleDriveClient
 from src.db.session import init_db, get_db
 from src.db.models import Session, WorkflowEvent, Persona, Sequence
 from src.integrations.slack_blocks import (
@@ -20,6 +24,7 @@ from src.integrations.slack_blocks import (
     persona_list_card,
     sequence_step_card,
     sequence_brief_card,
+    edit_step_modal,
 )
 
 # Sentry — must be initialized before anything else
@@ -38,8 +43,11 @@ normalizer = InputNormalizerAgent()
 discovery = PersonaDiscoveryAgent()
 scorer = ScorerAgent()
 generator = SequenceGeneratorAgent()
+editor = SequenceEditorAgent()
+exa = ExaClient()
+drive = GoogleDriveClient()
 
-REP_ROLES = {}  # slack user_id -> "AE" | "MDR" — populated from Slack profile or config
+REP_ROLES = {}  # slack user_id -> "AE" | "MDR"
 
 
 def get_rep_role(user_id: str) -> str:
@@ -64,6 +72,10 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
         logger.error(f"Failed to log workflow event: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 — Message intake + confirmation card
+# ---------------------------------------------------------------------------
+
 @app.message()
 def handle_message(message, say, client):
     user_id = message.get("user")
@@ -78,7 +90,6 @@ def handle_message(message, say, client):
 
     logger.info(f"New prospecting request from {user_id}: {text[:80]}")
 
-    # Run normalizer
     request = RepRequest(
         raw_message=text,
         rep_id=user_id,
@@ -88,7 +99,6 @@ def handle_message(message, say, client):
     )
     normalized = normalizer.normalize(request)
 
-    # Persist session
     try:
         db = next(get_db())
         session = Session(
@@ -109,7 +119,6 @@ def handle_message(message, say, client):
 
     log_event(session_id, "session_started", 1, user_id, {"raw_message": text})
 
-    # Send clarification or confirmation card
     if normalized.clarification_needed:
         say(
             blocks=clarification_card(normalized.clarification_question, session_id),
@@ -127,6 +136,10 @@ def handle_message(message, say, client):
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — Persona discovery
+# ---------------------------------------------------------------------------
+
 @app.action("confirm_intent")
 def handle_confirm_intent(ack, body, say):
     ack()
@@ -136,18 +149,18 @@ def handle_confirm_intent(ack, body, say):
 
     log_event(session_id, "intent_confirmed", 1, user_id, {})
 
-    say(
-        text="Running persona discovery... give me a moment.",
-        thread_ts=thread_ts,
-    )
+    say(text="Running persona discovery... give me a moment.", thread_ts=thread_ts)
 
-    # Load session to get account name + persona filter
     try:
         db = next(get_db())
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             say(text="Session not found. Please start a new request.", thread_ts=thread_ts)
             return
+
+        # Store thread_ts so edit handlers can post back to the right thread
+        session.thread_ts = thread_ts
+        db.commit()
 
         account_name = session.account_name
         normalized = session.normalized_request or {}
@@ -162,8 +175,10 @@ def handle_confirm_intent(ack, body, say):
 
         if not personas:
             say(
-                text=f"I couldn't find any contacts at *{account_name}* in Apollo. "
-                     "Check that the account name is correct or try a different company name.",
+                text=(
+                    f"I couldn't find any contacts at *{account_name}* in Apollo. "
+                    "Check that the account name is correct or try a different company name."
+                ),
                 thread_ts=thread_ts,
             )
             log_event(session_id, "discovery_empty", 2, user_id, {"account_name": account_name})
@@ -189,12 +204,12 @@ def handle_confirm_intent(ack, body, say):
                 status="discovered",
             )
             db.merge(persona_row)
+
         session.phase = 2
         db.commit()
 
         log_event(session_id, "discovery_complete", 2, user_id, {"persona_count": len(personas)})
 
-        # Post persona selection card
         say(
             blocks=persona_list_card(personas, session_id),
             text=f"Found {len(personas)} personas at {account_name}. Select who to include:",
@@ -203,15 +218,21 @@ def handle_confirm_intent(ack, body, say):
 
     except Exception as e:
         logger.error(f"Phase 2 failed for session {session_id}: {e}", exc_info=True)
-        say(
-            text="Something went wrong during persona discovery. Please try again.",
-            thread_ts=thread_ts,
-        )
+        say(text="Something went wrong during persona discovery. Please try again.", thread_ts=thread_ts)
 
+
+# Acknowledge persona checkbox interactions (state is read at confirm time)
+@app.action(re.compile(r"approve_persona_.*"))
+def handle_persona_checkbox(ack, body):
+    ack()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Checkpoint 1: persona approval → scoring → sequence generation
+# ---------------------------------------------------------------------------
 
 @app.action("confirm_personas")
 def handle_confirm_personas(ack, body, say):
-    """Checkpoint 1 — rep selects which personas to include."""
     ack()
     session_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
@@ -227,21 +248,24 @@ def handle_confirm_personas(ack, body, say):
                     selected_ids.append(opt["value"])
 
     if not selected_ids:
-        say(
-            text="Please select at least one persona before confirming.",
-            thread_ts=thread_ts,
-        )
+        say(text="Please select at least one persona before confirming.", thread_ts=thread_ts)
         return
 
     try:
         db = next(get_db())
+
+        # Mark approved / rejected
         all_personas = db.query(Persona).filter(Persona.session_id == session_id).all()
         for p in all_personas:
             p.approved_by_rep = p.id in selected_ids
             p.status = "approved" if p.id in selected_ids else "rejected"
+
         session = db.query(Session).filter(Session.id == session_id).first()
         if session:
             session.phase = 3
+            # Keep thread_ts in sync if it was set here
+            if not session.thread_ts:
+                session.thread_ts = thread_ts
         db.commit()
 
         log_event(session_id, "personas_approved", 2, user_id, {
@@ -250,15 +274,34 @@ def handle_confirm_personas(ack, body, say):
         })
 
         say(
-            text=f"Got it — {len(selected_ids)} persona(s) confirmed. Scoring and generating sequences...",
+            text=f"Got it — {len(selected_ids)} persona(s) confirmed. Researching account and generating sequences...",
             thread_ts=thread_ts,
         )
 
-        # Load session for account context
-        session = db.query(Session).filter(Session.id == session_id).first()
         account_name = session.account_name if session else ""
         normalized = (session.normalized_request or {}) if session else {}
+        account_domain = normalized.get("account_domain") or (session.account_domain if session else "")
         account_description = normalized.get("company_description")
+
+        # --- Exa account research (best-effort) ---
+        exa_signals = exa.research_account(account_name, account_domain or None)
+        if exa_signals:
+            # Attach signals to normalized_request for scorer context
+            if session:
+                nr = dict(session.normalized_request or {})
+                nr["exa_signals"] = exa_signals
+                session.normalized_request = nr
+                db.commit()
+            logger.info(f"[main] Exa returned {len(exa_signals)} signals for '{account_name}'")
+
+        # --- Google Drive account plan (best-effort) ---
+        account_plan_text = drive.find_account_plan(account_name)
+        if account_plan_text and session:
+            nr = dict(session.normalized_request or {})
+            nr["account_plan_text"] = account_plan_text[:4000]
+            session.normalized_request = nr
+            db.commit()
+            logger.info(f"[main] Drive account plan found for '{account_name}'")
 
         # Load approved personas
         approved_personas = (
@@ -277,14 +320,19 @@ def handle_confirm_personas(ack, body, say):
                 "outreach_lane": p.outreach_lane,
                 "priority_score": p.priority_score,
                 "linkedin_signals": p.linkedin_signals or [],
-                "gong_hook": p.gong_hook if hasattr(p, "gong_hook") else None,
+                "gong_hook": p.gong_hook,
                 "account_name": p.account_name,
             }
             for p in approved_personas
         ]
 
-        # Score + value-map
-        scored_personas = scorer.score(personas_dicts, account_description=account_description)
+        # Score + value-map (passes exa_signals and account_plan_text for richer hooks)
+        scored_personas = scorer.score(
+            personas_dicts,
+            account_description=account_description,
+            exa_signals=exa_signals,
+            account_plan_text=account_plan_text,
+        )
 
         # Update DB with scoring results
         for sp in scored_personas:
@@ -302,18 +350,17 @@ def handle_confirm_personas(ack, body, say):
                 persona=sp,
                 account_name=account_name,
                 account_description=account_description,
-                rep_name="Your Rep",  # TODO: pull from Slack profile
+                rep_name="Your Rep",
                 session_id=session_id,
             )
             sequences.append(seq)
 
-            # Persist sequence
             seq_row = Sequence(
                 id=seq["id"],
                 session_id=session_id,
                 persona_id=sp["id"],
                 lane=seq["lane"],
-                status="draft",
+                status="rep_review",
                 steps=seq["steps"],
                 edit_history=[],
             )
@@ -327,60 +374,201 @@ def handle_confirm_personas(ack, body, say):
             "sequence_count": len(sequences),
         })
 
-        # Post each sequence for rep review (Checkpoint 2)
+        # Post each sequence for rep review
         for seq in sequences:
             persona_match = next((p for p in scored_personas if p["id"] == seq["persona_id"]), {})
             name = f"{persona_match.get('first_name', '')} {persona_match.get('last_name', '')}".strip()
             lane = seq["lane"]
-            step_count = len(seq["steps"])
 
-            say(
-                text=f"Sequence for {name} ({lane} lane, {step_count} steps) — review below:",
-                thread_ts=thread_ts,
-            )
-
-            # Post each step
-            for step in seq["steps"]:
-                for block in sequence_step_card(step, name, seq["id"]):
-                    pass  # blocks collected below
-
-            # Post all steps as one message per sequence
-            all_blocks = []
-            all_blocks.append({
+            all_blocks = [{
                 "type": "header",
                 "text": {"type": "plain_text", "text": f"Sequence: {name} ({lane} lane)"},
-            })
+            }]
             for step in seq["steps"]:
                 all_blocks.extend(sequence_step_card(step, name, seq["id"]))
 
             all_blocks.append({
                 "type": "actions",
                 "block_id": f"approve_sequence_{seq['id']}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Approve Sequence"},
-                        "style": "primary",
-                        "action_id": "approve_sequence",
-                        "value": seq["id"],
-                    }
-                ],
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve All & Deliver Brief"},
+                    "style": "primary",
+                    "action_id": "approve_sequence",
+                    "value": seq["id"],
+                }],
             })
 
-            say(
-                blocks=all_blocks,
-                text=f"Sequence for {name}",
-                thread_ts=thread_ts,
-            )
+            say(blocks=all_blocks, text=f"Sequence for {name}", thread_ts=thread_ts)
 
     except Exception as e:
         logger.error(f"confirm_personas failed for session {session_id}: {e}", exc_info=True)
         say(text="Something went wrong saving your selections. Please try again.", thread_ts=thread_ts)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 — Checkpoint 2: step-level edit loop
+# ---------------------------------------------------------------------------
+
+@app.action(re.compile(r"edit_step_.*"))
+def handle_edit_step(ack, body, client):
+    """Rep clicks Edit on a step — open a modal to capture their instruction."""
+    ack()
+    value = body["actions"][0]["value"]  # "sequence_id:step_number"
+    trigger_id = body["trigger_id"]
+
+    try:
+        sequence_id, step_number_str = value.split(":", 1)
+        step_number = int(step_number_str)
+
+        db = next(get_db())
+        seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
+        if not seq:
+            return
+
+        step = next((s for s in (seq.steps or []) if s["step_number"] == step_number), None)
+        if not step:
+            return
+
+        # Get thread_ts from session so the modal submit can post back to the right thread
+        session = db.query(Session).filter(Session.id == seq.session_id).first()
+        thread_ts = (session.thread_ts or "") if session else ""
+
+        client.views_open(
+            trigger_id=trigger_id,
+            view=edit_step_modal(step, sequence_id, thread_ts),
+        )
+
+    except Exception as e:
+        logger.error(f"handle_edit_step failed: {e}", exc_info=True)
+
+
+@app.view("edit_step_modal_submit")
+def handle_edit_modal_submit(ack, body, client, say):
+    """Rep submits the edit modal — apply the edit and re-post the updated step."""
+    ack()
+    user_id = body["user"]["id"]
+    metadata = body["view"]["private_metadata"]  # "sequence_id:step_number:thread_ts"
+    state = body["view"]["state"]["values"]
+
+    try:
+        parts = metadata.split(":", 2)
+        sequence_id = parts[0]
+        step_number = int(parts[1])
+        thread_ts = parts[2] if len(parts) > 2 else ""
+
+        instruction = state["edit_instruction"]["instruction_input"]["value"] or ""
+        edit_field = "body"
+        if "edit_field_select" in state:
+            edit_field = state["edit_field_select"]["field_select"].get("selected_option", {}).get("value", "body")
+
+        db = next(get_db())
+        seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
+        if not seq:
+            return
+
+        steps = list(seq.steps or [])
+        step_idx = next((i for i, s in enumerate(steps) if s["step_number"] == step_number), None)
+        if step_idx is None:
+            return
+
+        original_step = steps[step_idx]
+        updated_step = editor.apply_edit(original_step, instruction, edit_field)
+        updated_step["status"] = "draft"  # reset approval on edit
+
+        # Record edit history
+        history = list(seq.edit_history or [])
+        history.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "step_number": step_number,
+            "instruction": instruction,
+            "field": edit_field,
+            "before_body": original_step.get("body"),
+            "after_body": updated_step.get("body"),
+        })
+
+        steps[step_idx] = updated_step
+        seq.steps = steps
+        seq.edit_history = history
+        db.commit()
+
+        log_event(seq.session_id, "step_edited", 4, user_id, {
+            "sequence_id": sequence_id,
+            "step_number": step_number,
+            "instruction": instruction,
+        })
+
+        # Get persona name for display
+        persona = db.query(Persona).filter(Persona.id == seq.persona_id).first()
+        persona_name = f"{persona.first_name} {persona.last_name}".strip() if persona else ""
+
+        # Get channel_id from session
+        session = db.query(Session).filter(Session.id == seq.session_id).first()
+        channel_id = session.channel_id if session else None
+
+        if channel_id and thread_ts:
+            updated_blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"✏️ *Step {step_number} updated* — here's the revised version:",
+                    },
+                }
+            ]
+            updated_blocks.extend(sequence_step_card(updated_step, persona_name, sequence_id))
+
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                blocks=updated_blocks,
+                text=f"Step {step_number} updated.",
+            )
+
+    except Exception as e:
+        logger.error(f"handle_edit_modal_submit failed: {e}", exc_info=True)
+
+
+@app.action(re.compile(r"approve_step_.*"))
+def handle_approve_step(ack, body, say):
+    """Rep approves an individual step."""
+    ack()
+    value = body["actions"][0]["value"]  # "sequence_id:step_number"
+    thread_ts = body["message"]["ts"]
+
+    try:
+        sequence_id, step_number_str = value.split(":", 1)
+        step_number = int(step_number_str)
+
+        db = next(get_db())
+        seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
+        if not seq:
+            return
+
+        steps = list(seq.steps or [])
+        for s in steps:
+            if s["step_number"] == step_number:
+                s["status"] = "approved"
+        seq.steps = steps
+        db.commit()
+
+        approved_count = sum(1 for s in steps if s.get("status") == "approved")
+        say(
+            text=f"✅ Step {step_number} approved. ({approved_count}/{len(steps)} steps done)",
+            thread_ts=thread_ts,
+        )
+
+    except Exception as e:
+        logger.error(f"handle_approve_step failed: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Checkpoint 2: full sequence approval → brief delivery
+# ---------------------------------------------------------------------------
+
 @app.action("approve_sequence")
 def handle_approve_sequence(ack, body, say):
-    """Checkpoint 2 — rep approves a generated sequence. Delivers the final brief."""
+    """Rep approves the full sequence — delivers the final brief."""
     ack()
     sequence_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
@@ -429,10 +617,13 @@ def handle_approve_sequence(ack, body, say):
         say(text="Something went wrong delivering the sequence brief.", thread_ts=thread_ts)
 
 
+# ---------------------------------------------------------------------------
+# Utility handlers
+# ---------------------------------------------------------------------------
+
 @app.action("edit_intent")
 def handle_edit_intent(ack, body, say):
     ack()
-    session_id = body["actions"][0]["value"]
     say(
         text="No problem — tell me what to change. Which account did you want to target?",
         thread_ts=body["message"]["ts"],
@@ -444,7 +635,6 @@ def handle_submit_clarification(ack, body, say, client):
     ack()
     session_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
-    # Extract clarification input value
     state = body.get("state", {}).get("values", {})
     clarification_text = ""
     for block_values in state.values():
@@ -453,7 +643,6 @@ def handle_submit_clarification(ack, body, say, client):
 
     log_event(session_id, "intent_corrected", 1, user_id, {"clarification": clarification_text})
 
-    # Re-run normalizer with the clarification text
     rep_role = get_rep_role(user_id)
     request = RepRequest(
         raw_message=clarification_text,
@@ -471,28 +660,6 @@ def handle_submit_clarification(ack, body, say, client):
             session_id=session_id,
         ),
         text=f"Got it — {normalized.account_name}. Is that right?",
-    )
-
-
-@app.action("approve_step")
-def handle_approve_step(ack, body, say):
-    """Acknowledge step approval — full edit loop built in Phase 5."""
-    ack()
-    value = body["actions"][0]["value"]  # "sequence_id:step_number"
-    say(
-        text=f"Step approved.",
-        thread_ts=body["message"]["ts"],
-    )
-
-
-@app.action("edit_step")
-def handle_edit_step(ack, body, say):
-    """Prompt rep to reply with edited copy — full modal edit built in Phase 5."""
-    ack()
-    value = body["actions"][0]["value"]  # "sequence_id:step_number"
-    say(
-        text="Reply here with your edited copy for this step and I'll update it.",
-        thread_ts=body["message"]["ts"],
     )
 
 

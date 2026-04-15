@@ -75,6 +75,7 @@ class ApolloClient:
         self.headers = {
             "Content-Type": "application/json",
             "Cache-Control": "no-cache",
+            "X-Api-Key": self.api_key,
         }
 
     def search_people(
@@ -95,10 +96,9 @@ class ApolloClient:
 
         try:
             response = httpx.post(
-                f"{self.BASE_URL}/mixed_people/search",
+                f"{self.BASE_URL}/people/search",
                 headers=self.headers,
                 json={
-                    "api_key": self.api_key,
                     "q_organization_name": organization_name,
                     "person_titles": all_titles,
                     "page": 1,
@@ -126,7 +126,6 @@ class ApolloClient:
             response = httpx.get(
                 f"{self.BASE_URL}/people/{person_id}",
                 headers=self.headers,
-                params={"api_key": self.api_key},
                 timeout=10,
             )
             response.raise_for_status()

@@ -30,6 +30,10 @@ class Settings:
 
     # Google Drive
     GOOGLE_SERVICE_ACCOUNT_JSON_PATH: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "")
+    GOOGLE_DRIVE_ACCOUNT_PLANS_FOLDER_ID: str = os.getenv("GOOGLE_DRIVE_ACCOUNT_PLANS_FOLDER_ID", "")
+
+    # Exa (account research)
+    EXA_API_KEY: str = os.getenv("EXA_API_KEY", "")
 
     # Database
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
@@ -40,6 +44,7 @@ class Settings:
     # App
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "info")
+    MOCK_PERSONAS: bool = os.getenv("MOCK_PERSONAS", "false").lower() == "true"
 
 
 settings = Settings()

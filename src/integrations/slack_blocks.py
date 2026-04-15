@@ -90,7 +90,7 @@ def persona_card(persona: dict, index: int) -> dict:
             "text": (
                 f"*{persona.get('first_name')} {persona.get('last_name')}* — {persona.get('title')}\n"
                 f"{score_emoji} {score} priority  |  {lane} lane  |  {driver}\n"
-                f"_{persona.get('score_reasoning', '')}_"
+                f"_{persona.get('score_reasoning') or ''}_"
             ),
         },
         "accessory": {
@@ -162,19 +162,84 @@ def sequence_step_card(step: dict, persona_name: str, sequence_id: str) -> list:
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Approve"},
                     "style": "primary",
-                    "action_id": "approve_step",
+                    "action_id": f"approve_step_{step['step_number']}",
                     "value": f"{sequence_id}:{step['step_number']}",
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Edit"},
-                    "action_id": "edit_step",
+                    "action_id": f"edit_step_{step['step_number']}",
                     "value": f"{sequence_id}:{step['step_number']}",
                 },
             ],
         },
         {"type": "divider"},
     ]
+
+
+def edit_step_modal(step: dict, sequence_id: str, thread_ts: str) -> dict:
+    """Modal view for editing a single sequence step."""
+    channel = step.get("channel", "email")
+    step_num = step.get("step_number", 1)
+    has_subject = channel == "email" and step.get("subject_line")
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Step {step_num} — {channel.title()} (Day {step.get('day_offset', 0)})*\n"
+                    + (f"Subject: _{step.get('subject_line')}_\n" if has_subject else "")
+                    + f"```{(step.get('body') or '')[:500]}```"
+                ),
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "edit_instruction",
+            "label": {"type": "plain_text", "text": "What should I change?"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "instruction_input",
+                "multiline": True,
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": "e.g. 'Make it shorter', 'Focus on labor costs', 'Change the subject line to reference inventory accuracy'",
+                },
+            },
+        },
+    ]
+
+    if has_subject:
+        blocks.append({
+            "type": "input",
+            "block_id": "edit_field_select",
+            "label": {"type": "plain_text", "text": "What to edit"},
+            "element": {
+                "type": "static_select",
+                "action_id": "field_select",
+                "initial_option": {
+                    "text": {"type": "plain_text", "text": "Body only"},
+                    "value": "body",
+                },
+                "options": [
+                    {"text": {"type": "plain_text", "text": "Body only"}, "value": "body"},
+                    {"text": {"type": "plain_text", "text": "Subject line only"}, "value": "subject_line"},
+                    {"text": {"type": "plain_text", "text": "Both"}, "value": "both"},
+                ],
+            },
+        })
+
+    return {
+        "type": "modal",
+        "callback_id": "edit_step_modal_submit",
+        "private_metadata": f"{sequence_id}:{step_num}:{thread_ts}",
+        "title": {"type": "plain_text", "text": f"Edit Step {step_num}"},
+        "submit": {"type": "plain_text", "text": "Apply Edit"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
 
 
 def sequence_brief_card(sequence: dict, persona: dict) -> list:

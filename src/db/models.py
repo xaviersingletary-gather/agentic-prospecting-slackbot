@@ -19,6 +19,7 @@ class Session(Base):
     rep_id = Column(String, nullable=False)
     rep_role = Column(String)                    # AE | MDR
     channel_id = Column(String)
+    thread_ts = Column(String)                   # Slack thread timestamp for the active workflow
     phase = Column(Integer, default=1)
     status = Column(String, default="active")    # active | completed | cancelled
     normalized_request = Column(JSON)
@@ -46,6 +47,7 @@ class Persona(Base):
     score_reasoning = Column(Text)
     outreach_lane = Column(String)               # AE | MDR
     linkedin_signals = Column(JSON, default=list)
+    gong_hook = Column(Text)
     value_driver = Column(JSON)
     approved_by_rep = Column(Boolean)
     created_at = Column(DateTime, default=datetime.utcnow)

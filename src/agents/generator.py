@@ -220,6 +220,12 @@ def _resolve_gong_hook(persona: dict) -> tuple[str, str]:
     if gong_hook:
         return gong_hook, "a recent conversation"
 
+    # Use Exa/Drive research hook if available
+    value_driver = persona.get("value_driver") or {}
+    research_hook = value_driver.get("research_hook")
+    if research_hook:
+        return research_hook, "recent activity"
+
     signals = persona.get("linkedin_signals") or []
     if signals:
         top = signals[0]
@@ -231,7 +237,6 @@ def _resolve_gong_hook(persona: dict) -> tuple[str, str]:
                 "your recent post",
             )
 
-    value_driver = persona.get("value_driver") or {}
     opener = value_driver.get("default_opener", "")
     return opener, "inventory operations"
 

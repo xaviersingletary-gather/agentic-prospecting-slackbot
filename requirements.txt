@@ -1,4 +1,5 @@
 anthropic>=0.40.0
+cryptography>=42.0.0
 slack-bolt>=1.18.0
 slack-sdk>=3.27.0
 sqlalchemy>=2.0.0

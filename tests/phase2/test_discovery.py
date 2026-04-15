@@ -6,6 +6,8 @@ Run with: pytest tests/phase2/ -v
 import pytest
 from unittest.mock import patch, MagicMock
 
+from unittest.mock import patch as _patch
+
 from src.agents.discovery import (
     classify_persona_type,
     classify_seniority,
@@ -14,6 +16,19 @@ from src.agents.discovery import (
     PersonaDiscoveryAgent,
 )
 from src.integrations.slack_blocks import persona_list_card, persona_card
+import src.agents.discovery as _discovery_module
+
+
+def _no_mock(fn):
+    """Decorator: force MOCK_PERSONAS=False so integration tests exercise the real Apollo path."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _patch.object(_discovery_module.settings, "MOCK_PERSONAS", False):
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # --- Unit: persona type classification ---
@@ -153,6 +168,7 @@ class TestPersonaDiscoveryAgent:
             for i in range(count)
         ]
 
+    @_no_mock
     @patch("src.agents.discovery.ClayClient")
     @patch("src.agents.discovery.ApolloClient")
     def test_max_8_enforced(self, MockApollo, MockClay):
@@ -168,6 +184,7 @@ class TestPersonaDiscoveryAgent:
         results = agent.discover("sess-1", "Acme Corp")
         assert len(results) <= 8
 
+    @_no_mock
     @patch("src.agents.discovery.ClayClient")
     @patch("src.agents.discovery.ApolloClient")
     def test_empty_apollo_returns_empty(self, MockApollo, MockClay):
@@ -180,6 +197,7 @@ class TestPersonaDiscoveryAgent:
         results = agent.discover("sess-1", "Unknown Corp")
         assert results == []
 
+    @_no_mock
     @patch("src.agents.discovery.ClayClient")
     @patch("src.agents.discovery.ApolloClient")
     def test_persona_filter_applied(self, MockApollo, MockClay):
@@ -196,6 +214,7 @@ class TestPersonaDiscoveryAgent:
         for p in results:
             assert p["persona_type"] == "TDM"
 
+    @_no_mock
     @patch("src.agents.discovery.ClayClient")
     @patch("src.agents.discovery.ApolloClient")
     def test_sorted_high_to_low(self, MockApollo, MockClay):
@@ -213,6 +232,7 @@ class TestPersonaDiscoveryAgent:
         tiers = [tier_order[p["priority_score"]] for p in results]
         assert tiers == sorted(tiers)
 
+    @_no_mock
     @patch("src.agents.discovery.ClayClient")
     @patch("src.agents.discovery.ApolloClient")
     def test_clay_failure_does_not_crash(self, MockApollo, MockClay):

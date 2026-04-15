@@ -9,10 +9,14 @@ from src.agents.normalizer import InputNormalizerAgent, RepRequest, NormalizedRe
 
 @pytest.fixture
 def agent():
-    with patch("src.agents.normalizer.anthropic.Anthropic"), \
-         patch("src.agents.normalizer.HubSpotClient"), \
+    with patch("src.agents.normalizer.HubSpotClient"), \
          patch("src.agents.normalizer.ClayClient"):
-        return InputNormalizerAgent()
+        a = InputNormalizerAgent()
+        # Always stub _extract_intent so tests never hit the real LLM
+        a._extract_intent = MagicMock(return_value={
+            "account_name": None, "persona_filter": None, "use_case_angle": None
+        })
+        return a
 
 
 def mock_extraction(agent, account_name=None, persona_filter=None, use_case_angle=None):

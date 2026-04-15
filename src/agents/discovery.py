@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from src.config import settings
+from src.config import settings  # noqa: F401 (used for MOCK_PERSONAS)
 from src.integrations.apollo import ApolloClient, PERSONA_TITLE_KEYWORDS
 from src.integrations.clay import ClayClient
 
@@ -104,6 +104,46 @@ def normalize_apollo_person(raw: dict, session_id: str) -> dict:
     }
 
 
+MOCK_PEOPLE = [
+    {
+        "first_name": "Sarah", "last_name": "Chen",
+        "title": "VP of Operations", "email": "s.chen@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/sarah-chen-ops",
+        "organization": {"name": "{account_name}"},
+    },
+    {
+        "first_name": "Marcus", "last_name": "Williams",
+        "title": "Director of Continuous Improvement", "email": "m.williams@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/marcus-williams-ci",
+        "organization": {"name": "{account_name}"},
+    },
+    {
+        "first_name": "Jennifer", "last_name": "Park",
+        "title": "Chief Supply Chain Officer", "email": "j.park@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/jennifer-park-csco",
+        "organization": {"name": "{account_name}"},
+    },
+    {
+        "first_name": "David", "last_name": "Torres",
+        "title": "Director of Inventory Control", "email": "d.torres@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/david-torres-inv",
+        "organization": {"name": "{account_name}"},
+    },
+    {
+        "first_name": "Aisha", "last_name": "Johnson",
+        "title": "Automation Manager", "email": "a.johnson@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/aisha-johnson-auto",
+        "organization": {"name": "{account_name}"},
+    },
+    {
+        "first_name": "Robert", "last_name": "Kim",
+        "title": "VP of IT", "email": "r.kim@mockco.com",
+        "linkedin_url": "https://linkedin.com/in/robert-kim-it",
+        "organization": {"name": "{account_name}"},
+    },
+]
+
+
 class PersonaDiscoveryAgent:
     def __init__(self):
         self.apollo = ApolloClient()
@@ -121,6 +161,19 @@ class PersonaDiscoveryAgent:
         """
         started_at = datetime.utcnow()
         logger.info(f"[discovery] Starting for account='{account_name}' session={session_id}")
+
+        # Mock mode — bypass Apollo for local testing
+        if settings.MOCK_PERSONAS:
+            logger.info("[discovery] MOCK_PERSONAS=true — using mock data")
+            raw_people = [
+                {**p, "organization": {"name": account_name}}
+                for p in MOCK_PEOPLE
+            ]
+            personas = [normalize_apollo_person(p, session_id) for p in raw_people]
+            if persona_filter:
+                personas = [p for p in personas if p["persona_type"] in persona_filter]
+            logger.info(f"[discovery] Mock complete — {len(personas)} personas")
+            return personas
 
         # 1. Pull people from Apollo
         raw_people = self.apollo.search_people(

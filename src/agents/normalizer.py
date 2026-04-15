@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-import anthropic
+import httpx
 
 from src.config import settings
 from src.integrations.clay import ClayClient
@@ -69,10 +69,6 @@ class NormalizedRequest:
 
 class InputNormalizerAgent:
     def __init__(self):
-        self.client = anthropic.Anthropic(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url=settings.OPENROUTER_BASE_URL,
-        )
         self.hubspot = HubSpotClient()
         self.clay = ClayClient()
 
@@ -145,25 +141,71 @@ class InputNormalizerAgent:
         return result
 
     def _extract_intent(self, raw_message: str) -> dict:
-        try:
-            response = self.client.messages.create(
-                model=settings.OPENROUTER_MODEL,
-                max_tokens=256,
-                messages=[{
-                    "role": "user",
-                    "content": EXTRACTION_PROMPT.format(message=raw_message),
-                }],
-            )
-            text = response.content[0].text.strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            return json.loads(text)
-        except (json.JSONDecodeError, IndexError, KeyError, Exception) as e:
-            logger.warning(f"Intent extraction failed: {e}")
-            return {"account_name": None, "persona_filter": None, "use_case_angle": None}
+        # Try LLM extraction first
+        if settings.OPENROUTER_API_KEY and settings.OPENROUTER_BASE_URL:
+            url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
+            logger.debug(f"[normalizer] Calling OpenRouter: {url} model={settings.OPENROUTER_MODEL}")
+            try:
+                response = httpx.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": settings.OPENROUTER_MODEL,
+                        "max_tokens": 256,
+                        "messages": [{
+                            "role": "user",
+                            "content": EXTRACTION_PROMPT.format(message=raw_message),
+                        }],
+                    },
+                    timeout=15,
+                )
+                response.raise_for_status()
+                text = response.json()["choices"][0]["message"]["content"].strip()
+                if text.startswith("```"):
+                    text = text.split("```")[1]
+                    if text.startswith("json"):
+                        text = text[4:]
+                result = json.loads(text)
+                logger.info(f"[normalizer] LLM extracted: {result}")
+                return result
+            except Exception as e:
+                logger.warning(f"[normalizer] LLM extraction failed: {e} — falling back to regex")
+
+        # Regex fallback: handles "run outreach for X", "prospect X", "build sequences for X", etc.
+        return self._regex_extract(raw_message)
+
+    def _regex_extract(self, raw_message: str) -> dict:
+        import re
+        text = raw_message.strip()
+        account_name = None
+
+        # Pattern 1: explicit command phrases — "run outreach for X", "prospect X", etc.
+        command_patterns = [
+            r"(?:run outreach for|outreach for|prospect(?:ing)? for|build sequences? for|sequences? for|run prospecting for|prospecting for|target(?:ing)? for)\s+(.+?)(?:\s*$|\s+and\b|\s+focus\b|\s+in\b)",
+            r"for\s+([A-Za-z0-9][A-Za-z0-9\s&.,'-]{1,60})(?:\s*$)",
+        ]
+        for pattern in command_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                account_name = match.group(1).strip().rstrip(".,")
+                break
+
+        # Pattern 2: strip common command words and treat remainder as company name
+        if not account_name:
+            cleaned = re.sub(
+                r"^(run|build|do|create|generate|start|make|get|find)?\s*(outreach|prospecting|sequences?|contacts?|personas?)?\s*(for|at|on)?\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip().rstrip(".,")
+            if cleaned and len(cleaned) >= 2:
+                account_name = cleaned
+
+        logger.info(f"[normalizer] Regex extracted account_name='{account_name}'")
+        return {"account_name": account_name, "persona_filter": None, "use_case_angle": None}
 
     def _calculate_confidence(
         self,

@@ -91,7 +91,34 @@ def has_recent_linkedin_signal(signals: list, days: int = 90) -> bool:
     return False
 
 
-def score_persona(persona: dict, account_description: Optional[str] = None) -> dict:
+def build_research_hook(
+    exa_signals: Optional[list],
+    account_plan_text: Optional[str],
+    persona_type: str,
+) -> Optional[str]:
+    """
+    Derive a personalized hook sentence from Exa signals or account plan text.
+    Returns None if no useful signal found.
+    """
+    # Try account plan first — highest quality signal
+    if account_plan_text:
+        snippet = account_plan_text[:300].strip()
+        if snippet:
+            return f"Based on your account context: {snippet[:200]}..."
+
+    # Try Exa signals — prefer operations_news over hiring_signals
+    if exa_signals:
+        for signal in exa_signals:
+            snippet = signal.get("snippet") or signal.get("headline") or ""
+            if snippet and len(snippet) > 30:
+                return snippet[:200]
+
+    return None
+
+
+def score_persona(persona: dict, account_description: Optional[str] = None,
+                  exa_signals: Optional[list] = None,
+                  account_plan_text: Optional[str] = None) -> dict:
     """Apply scoring and value-driver mapping to a single persona. Returns updated dict."""
     persona_type = persona.get("persona_type", "ODM")
     seniority = persona.get("seniority", "Manager")
@@ -100,6 +127,11 @@ def score_persona(persona: dict, account_description: Optional[str] = None) -> d
 
     value_driver = dict(VALUE_DRIVERS.get(persona_type, VALUE_DRIVERS["ODM"]))
     value_driver["comparable_customer"] = get_comparable_customer(account_description)
+
+    # Inject research hook if available (Exa or Drive account plan)
+    research_hook = build_research_hook(exa_signals, account_plan_text, persona_type)
+    if research_hook:
+        value_driver["research_hook"] = research_hook
 
     reasoning_parts = [f"Default tier for {persona_type}: {current_tier}."]
 
@@ -128,9 +160,14 @@ class ScorerAgent:
         self,
         personas: list[dict],
         account_description: Optional[str] = None,
+        exa_signals: Optional[list] = None,
+        account_plan_text: Optional[str] = None,
     ) -> list[dict]:
         """Score and value-map approved personas. Returns sorted list High -> Medium -> Low."""
-        scored = [score_persona(p, account_description) for p in personas]
+        scored = [
+            score_persona(p, account_description, exa_signals, account_plan_text)
+            for p in personas
+        ]
 
         scored.sort(key=lambda p: (
             -TIER_RANK.get(p["priority_score"], 1),
