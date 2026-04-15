@@ -1,8 +1,15 @@
 import logging
 import os
 import re
+import sys
 import uuid
 from datetime import datetime
+
+# Ensure project root is in sys.path so 'src' is importable regardless of how
+# Railway (or any other host) invokes this file.
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import sentry_sdk
 from slack_bolt import App
