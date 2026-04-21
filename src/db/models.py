@@ -10,6 +10,42 @@ def generate_uuid():
     return str(uuid.uuid4())
 
 
+class CompanyResearch(Base):
+    __tablename__ = "company_research"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, nullable=False)
+    account_name = Column(String)
+    is_public_company = Column(Boolean)
+    facility_count = Column(Integer)
+    facility_count_note = Column(String)
+    total_sqft_estimate = Column(Integer)
+    sqft_source = Column(String)
+    board_initiatives = Column(JSON, default=list)    # [{title, summary, source}]
+    company_priorities = Column(JSON, default=list)   # [str]
+    trigger_events = Column(JSON, default=list)       # [{description, source, date, relevance}]
+    automation_vendors = Column(JSON, default=list)   # [{vendor_name, category, deployment_status, source}]
+    exception_tax = Column(JSON)                      # {total_sqft, pallet_positions, annual_savings_usd, ...}
+    research_gaps = Column(JSON, default=list)        # [str]
+    documents_used = Column(JSON, default=list)       # [{doc_type, source_url, filing_period}]
+    raw_research_text = Column(Text)                  # full compiled research for debugging
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ContactResearch(Base):
+    __tablename__ = "contact_research"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    persona_id = Column(String, nullable=False)
+    session_id = Column(String)
+    current_role_tenure = Column(String)
+    prior_roles = Column(JSON, default=list)          # [{title, company, duration}]
+    recent_linkedin = Column(JSON, default=list)      # [{type, content, date}]
+    speaking_activity = Column(String)
+    research_gaps = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Session(Base):
     __tablename__ = "sessions"
 
@@ -20,7 +56,9 @@ class Session(Base):
     rep_role = Column(String)                    # AE | MDR
     channel_id = Column(String)
     thread_ts = Column(String)                   # Slack thread timestamp for the active workflow
+    progress_message_ts = Column(String)         # ts of the live-updating progress/research message
     phase = Column(Integer, default=1)
+    phase_label = Column(String)                 # human-readable phase label for resume UX
     status = Column(String, default="active")    # active | completed | cancelled
     normalized_request = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -50,6 +88,7 @@ class Persona(Base):
     gong_hook = Column(Text)
     value_driver = Column(JSON)
     approved_by_rep = Column(Boolean)
+    deep_research_flagged = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

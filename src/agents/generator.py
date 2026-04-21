@@ -211,21 +211,48 @@ def _resolve_vertical(account_description: Optional[str]) -> str:
     return "logistics"
 
 
-def _resolve_gong_hook(persona: dict) -> tuple[str, str]:
+def _resolve_hook(persona: dict, company_research: Optional[dict]) -> tuple:
     """
     Returns (hook_body, hook_subject).
-    Tries gong_hook first, then LinkedIn signals, then value driver default opener.
+    Priority: gong_hook > company research trigger event > Exa/Drive research hook
+    > LinkedIn signal > value driver default opener.
     """
+    # 1. Gong hook (call transcript)
     gong_hook = persona.get("gong_hook")
     if gong_hook:
         return gong_hook, "a recent conversation"
 
-    # Use Exa/Drive research hook if available
+    # 2. Company research trigger event
+    if company_research:
+        trigger_events = company_research.get("trigger_events") or []
+        if trigger_events:
+            t = trigger_events[0]
+            desc = t.get("description", "")[:200]
+            if desc:
+                return (
+                    f"Noticed {desc.lower().rstrip('.')} — thought it was worth reaching out.",
+                    "a recent development",
+                )
+        # 3. Board initiative as hook
+        board_initiatives = company_research.get("board_initiatives") or []
+        if board_initiatives:
+            init = board_initiatives[0]
+            title = init.get("title", "")
+            source = init.get("source", "recent reports")
+            if title:
+                return (
+                    f"Saw that {company_research.get('account_name', 'your team')} "
+                    f"is focused on {title.lower()} — per {source}.",
+                    "a strategic priority",
+                )
+
+    # 4. Exa/Drive research hook
     value_driver = persona.get("value_driver") or {}
     research_hook = value_driver.get("research_hook")
     if research_hook:
         return research_hook, "recent activity"
 
+    # 5. LinkedIn signal
     signals = persona.get("linkedin_signals") or []
     if signals:
         top = signals[0]
@@ -237,8 +264,39 @@ def _resolve_gong_hook(persona: dict) -> tuple[str, str]:
                 "your recent post",
             )
 
+    # 6. Value driver default opener
     opener = value_driver.get("default_opener", "")
     return opener, "inventory operations"
+
+
+def _resolve_individual_opener(contact_research: Optional[dict]) -> str:
+    """
+    Build a personalized opening sentence from individual contact research.
+    Used in deep-tier sequences to reference the contact's own background.
+    """
+    if not contact_research:
+        return ""
+
+    # Recent LinkedIn post — most timely signal
+    linkedin = contact_research.get("recent_linkedin") or []
+    if linkedin:
+        content = linkedin[0].get("content", "")[:120]
+        if content:
+            return f"Came across your recent post about {content.lower().rstrip('.')}."
+
+    # Speaking activity
+    speaking = contact_research.get("speaking_activity")
+    if speaking:
+        return f"Came across {speaking[:100].lower().rstrip('.')} — great context."
+
+    # Prior company reference
+    prior_roles = contact_research.get("prior_roles") or []
+    if prior_roles:
+        prior_company = prior_roles[0].get("company", "")
+        if prior_company:
+            return f"Knowing your background at {prior_company}, I thought this would be directly relevant."
+
+    return ""
 
 
 def _fill_tokens(text: Optional[str], tokens: dict) -> Optional[str]:
@@ -261,6 +319,8 @@ class SequenceGeneratorAgent:
         account_description: Optional[str] = None,
         rep_name: str = "your rep",
         session_id: str = "",
+        company_research: Optional[dict] = None,
+        contact_research: Optional[dict] = None,
     ) -> dict:
         """
         Generate a full sequence for a single scored persona.
@@ -268,8 +328,18 @@ class SequenceGeneratorAgent:
         """
         lane = persona.get("outreach_lane", "MDR")
         value_driver = persona.get("value_driver") or {}
-        hook_body, hook_subject = _resolve_gong_hook(persona)
         vertical = _resolve_vertical(account_description)
+
+        # Resolve the opening hook — prefer company research trigger events over gong/LinkedIn
+        hook_body, hook_subject = _resolve_hook(persona, company_research)
+
+        # DC count — prefer company research over placeholder
+        dc_count = "your"
+        if company_research and company_research.get("facility_count"):
+            dc_count = str(company_research["facility_count"])
+
+        # Individual personalization opener (deep tier only)
+        individual_opener = _resolve_individual_opener(contact_research) if contact_research else ""
 
         tokens = {
             "first_name": persona.get("first_name", ""),
@@ -282,7 +352,8 @@ class SequenceGeneratorAgent:
             "gong_hook_or_signal": hook_body,
             "gong_hook_or_value_driver_opener": hook_body,
             "gong_hook_subject": hook_subject,
-            "dc_count": "your",  # Will be populated from HubSpot account plan when available
+            "dc_count": dc_count,
+            "individual_opener": individual_opener,
         }
 
         template_steps = copy.deepcopy(AE_STEPS if lane == "AE" else MDR_STEPS)
@@ -298,11 +369,14 @@ class SequenceGeneratorAgent:
                 "status": "draft",
             })
 
+        personalization_tier = "deep" if contact_research else "standard"
+
         sequence = {
             "id": str(uuid.uuid4()),
             "session_id": session_id,
             "persona_id": persona["id"],
             "lane": lane,
+            "personalization_tier": personalization_tier,
             "status": "draft",
             "steps": filled_steps,
             "edit_history": [],

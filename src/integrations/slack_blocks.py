@@ -1,5 +1,317 @@
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Research progress blocks — updated in place via chat.update
+# ---------------------------------------------------------------------------
+
+def research_progress_blocks(account_name: str, steps: list) -> list:
+    """
+    Live-updating progress card for company research.
+    `steps` is an ordered list of status lines added as each step completes.
+    """
+    steps_text = "\n".join(steps) if steps else "⏳ Starting..."
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Researching {account_name}...*\n\n{steps_text}",
+            },
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Research brief card — Checkpoint 1
+# ---------------------------------------------------------------------------
+
+def research_brief_card(research: dict, session_id: str) -> list:
+    """
+    Full research brief posted after company research completes.
+    Includes a 'Find contacts' button to advance to Checkpoint 2.
+    """
+    account_name = research.get("account_name", "")
+    facility_count = research.get("facility_count")
+    facility_note = research.get("facility_count_note") or ""
+    board_initiatives = research.get("board_initiatives") or []
+    company_priorities = research.get("company_priorities") or []
+    trigger_events = research.get("trigger_events") or []
+    automation_vendors = research.get("automation_vendors") or []
+    exception_tax = research.get("exception_tax") or {}
+    research_gaps = research.get("research_gaps") or []
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Research Brief — {account_name}"},
+        },
+    ]
+
+    # --- Facilities ---
+    if facility_count:
+        fac_str = f"~{facility_count:,} DCs/facilities"
+        if facility_note:
+            fac_str += f" _({facility_note})_"
+    else:
+        fac_str = "_Facility count not found — see Research Gaps_"
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"*Facilities:* {fac_str}"},
+    })
+
+    # --- Board initiatives ---
+    if board_initiatives:
+        init_lines = []
+        for i, item in enumerate(board_initiatives[:3], 1):
+            source = f" _(per {item.get('source', '')})_" if item.get("source") else ""
+            init_lines.append(
+                f"{i}. *{item.get('title', '')}* — {item.get('summary', '')}{source}"
+            )
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Board / Exec Initiatives*\n" + "\n".join(init_lines),
+            },
+        })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Board / Exec Initiatives*\n_None found with clear sources._",
+            },
+        })
+
+    # --- Company priorities ---
+    if company_priorities:
+        prio_text = "\n".join(f"• {p}" for p in company_priorities[:2])
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Operational Priorities*\n{prio_text}"},
+        })
+
+    # --- Trigger events ---
+    if trigger_events:
+        trigger_lines = []
+        for t in trigger_events[:2]:
+            date_str = f" ({t.get('date', '')})" if t.get("date") else ""
+            src_str = f" — _{t.get('source', '')}_" if t.get("source") else ""
+            trigger_lines.append(
+                f"• {t.get('description', '')}{date_str}{src_str}"
+            )
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Trigger Events*\n" + "\n".join(trigger_lines),
+            },
+        })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Trigger Events*\n_None identified._"},
+        })
+
+    # --- Automation / WMS vendors ---
+    if automation_vendors:
+        vendor_lines = [
+            f"• *{v.get('vendor_name', '')}* ({v.get('category', '')}) — {v.get('deployment_status', '')}"
+            for v in automation_vendors[:4]
+        ]
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Competitors in Account*\n" + "\n".join(vendor_lines),
+            },
+        })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Competitors in Account*\n_None identified from public sources._",
+            },
+        })
+
+    # --- Exception Tax ---
+    if exception_tax:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*Exception Tax Estimate*\n"
+                    f"```{exception_tax.get('math_shown', '')}```"
+                ),
+            },
+        })
+
+    # --- Research gaps ---
+    if research_gaps:
+        gap_lines = "\n".join(f"• {g}" for g in research_gaps[:5])
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Research Gaps (flagged, not guessed)*\n{gap_lines}",
+            },
+        })
+
+    blocks += [
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "block_id": f"research_actions_{session_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Find contacts →"},
+                    "style": "primary",
+                    "action_id": "find_contacts",
+                    "value": session_id,
+                },
+            ],
+        },
+    ]
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Contact list with deep-research flag buttons — Checkpoint 2
+# ---------------------------------------------------------------------------
+
+def contact_list_card(contacts: list, session_id: str, flagged_ids: set = None) -> list:
+    """
+    Contact list with per-contact flag buttons (⭐ deep research) and a confirm button.
+    Rep flags up to 3; bot enforces the cap in the action handler.
+    """
+    if flagged_ids is None:
+        flagged_ids = set()
+
+    flagged_count = len(flagged_ids)
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"Found *{len(contacts)} contacts*. "
+                    f"Flag up to *3* for deep individual research "
+                    f"_(flagged: {flagged_count}/3)_, then confirm."
+                ),
+            },
+        },
+        {"type": "divider"},
+    ]
+
+    for c in contacts:
+        pid = c.get("id", "")
+        name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
+        title = c.get("title", "")
+        ptype = c.get("persona_type", "")
+        lane = c.get("outreach_lane", "")
+        score = c.get("priority_score", "Medium")
+        score_emoji = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(score, "🟡")
+        is_flagged = pid in flagged_ids
+
+        flag_element = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "⭐ Flagged" if is_flagged else "⭐ Flag"},
+            "action_id": f"flag_contact_{pid}",
+            "value": f"{session_id}:{pid}",
+        }
+        if is_flagged:
+            flag_element["style"] = "primary"
+
+        blocks.append({
+            "type": "section",
+            "block_id": f"contact_{pid}",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{score_emoji} *{name}* — {title}\n"
+                    f"_{ptype}  |  {lane} lane_"
+                ),
+            },
+            "accessory": flag_element,
+        })
+
+    blocks += [
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "block_id": f"contact_confirm_{session_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Approve contacts & build sequences",
+                    },
+                    "style": "primary",
+                    "action_id": "approve_contacts",
+                    "value": session_id,
+                },
+            ],
+        },
+    ]
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Session resume card
+# ---------------------------------------------------------------------------
+
+def resume_session_card(session) -> list:
+    """Prompt rep to continue or cancel an existing active session."""
+    phase_labels = {
+        2: "company research in progress",
+        3: "review the research brief",
+        4: "review the contact list",
+        5: "sequences being generated",
+        6: "review and edit sequences",
+    }
+    phase_desc = phase_labels.get(session.phase, "in progress")
+    account = session.account_name or "your account"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"You have an active session for *{account}* "
+                    f"— currently at: _{phase_desc}_.\n\n"
+                    "Want to continue, or cancel and start fresh?"
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": f"resume_{session.id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Continue"},
+                    "style": "primary",
+                    "action_id": "resume_session",
+                    "value": session.id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Cancel & start fresh"},
+                    "style": "danger",
+                    "action_id": "cancel_session",
+                    "value": session.id,
+                },
+            ],
+        },
+    ]
+
 
 def confirmation_card(
     account_name: str,

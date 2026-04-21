@@ -21,14 +21,18 @@ from src.agents.discovery import PersonaDiscoveryAgent
 from src.agents.scorer import ScorerAgent
 from src.agents.generator import SequenceGeneratorAgent
 from src.agents.editor import SequenceEditorAgent
-from src.integrations.exa import ExaClient
+from src.agents.researcher import CompanyResearchAgent
+from src.agents.contact_researcher import ContactResearchAgent
 from src.integrations.google_drive import GoogleDriveClient
 from src.db.session import init_db, get_db
-from src.db.models import Session, WorkflowEvent, Persona, Sequence
+from src.db.models import Session, WorkflowEvent, Persona, Sequence, CompanyResearch, ContactResearch
 from src.integrations.slack_blocks import (
     confirmation_card,
     clarification_card,
-    persona_list_card,
+    research_progress_blocks,
+    research_brief_card,
+    contact_list_card,
+    resume_session_card,
     sequence_step_card,
     sequence_brief_card,
     edit_step_modal,
@@ -51,7 +55,8 @@ discovery = PersonaDiscoveryAgent()
 scorer = ScorerAgent()
 generator = SequenceGeneratorAgent()
 editor = SequenceEditorAgent()
-exa = ExaClient()
+researcher = CompanyResearchAgent()
+contact_researcher_agent = ContactResearchAgent()
 drive = GoogleDriveClient()
 
 REP_ROLES = {}  # slack user_id -> "AE" | "MDR"
@@ -80,7 +85,7 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Message intake + confirmation card
+# Phase 1 — Message intake + confirmation card (or session resume prompt)
 # ---------------------------------------------------------------------------
 
 @app.message()
@@ -92,6 +97,28 @@ def handle_message(message, say, client):
     if not text or message.get("bot_id"):
         return
 
+    # Check for an existing active session for this rep
+    try:
+        db = next(get_db())
+        existing = (
+            db.query(Session)
+            .filter(Session.rep_id == user_id, Session.status == "active")
+            .order_by(Session.created_at.desc())
+            .first()
+        )
+        if existing:
+            say(
+                blocks=resume_session_card(existing),
+                text=(
+                    f"You have an active session for {existing.account_name}. "
+                    "Continue or cancel?"
+                ),
+            )
+            return
+    except Exception as e:
+        logger.error(f"Session resume check failed: {e}")
+
+    # No active session — start a new one
     rep_role = get_rep_role(user_id)
     session_id = str(uuid.uuid4())
 
@@ -116,6 +143,7 @@ def handle_message(message, say, client):
             rep_role=rep_role,
             channel_id=channel_id,
             phase=1,
+            phase_label="confirmation",
             status="active",
             normalized_request=normalized.to_dict(),
         )
@@ -139,24 +167,23 @@ def handle_message(message, say, client):
                 use_case_angle=normalized.use_case_angle,
                 session_id=session_id,
             ),
-            text=f"Got it — running outreach for {normalized.account_name}. Is that right?",
+            text=f"Got it — researching {normalized.account_name}. Is that right?",
         )
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Persona discovery
+# Phase 2 — Company Research (triggered by "Yes, run it" button)
 # ---------------------------------------------------------------------------
 
 @app.action("confirm_intent")
-def handle_confirm_intent(ack, body, say):
+def handle_confirm_intent(ack, body, say, client):
     ack()
     session_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
+    channel_id = body["channel"]["id"]
 
     log_event(session_id, "intent_confirmed", 1, user_id, {})
-
-    say(text="Running persona discovery... give me a moment.", thread_ts=thread_ts)
 
     try:
         db = next(get_db())
@@ -165,200 +192,401 @@ def handle_confirm_intent(ack, body, say):
             say(text="Session not found. Please start a new request.", thread_ts=thread_ts)
             return
 
-        # Store thread_ts so edit handlers can post back to the right thread
         session.thread_ts = thread_ts
+        session.phase = 2
+        session.phase_label = "research_in_progress"
         db.commit()
 
         account_name = session.account_name
-        normalized = session.normalized_request or {}
-        persona_filter = normalized.get("persona_filter")
 
-        # Run persona discovery
-        personas = discovery.discover(
-            session_id=session_id,
+        # Post initial progress message — updated in place as each step completes
+        progress_resp = say(
+            blocks=research_progress_blocks(account_name, ["⏳ Starting company research..."]),
+            text=f"Researching {account_name}...",
+            thread_ts=thread_ts,
+        )
+        progress_ts = progress_resp.get("ts") if progress_resp else None
+
+        if progress_ts:
+            session.progress_message_ts = progress_ts
+            db.commit()
+
+        completed_steps = []
+
+        def update_progress(step_text: str):
+            completed_steps.append(step_text)
+            if progress_ts:
+                try:
+                    client.chat_update(
+                        channel=channel_id,
+                        ts=progress_ts,
+                        blocks=research_progress_blocks(account_name, completed_steps),
+                        text=f"Researching {account_name}...",
+                    )
+                except Exception as e:
+                    logger.warning(f"Progress update failed: {e}")
+
+        # Run company research with live progress
+        research_data = researcher.research(
             account_name=account_name,
-            persona_filter=persona_filter,
+            account_domain=session.account_domain or None,
+            progress_callback=update_progress,
         )
 
-        if not personas:
-            say(
-                text=(
-                    f"I couldn't find any contacts at *{account_name}* in Apollo. "
-                    "Check that the account name is correct or try a different company name."
-                ),
-                thread_ts=thread_ts,
-            )
-            log_event(session_id, "discovery_empty", 2, user_id, {"account_name": account_name})
-            return
+        # Persist CompanyResearch to DB
+        cr_row = CompanyResearch(
+            id=research_data["id"],
+            session_id=session_id,
+            account_name=research_data["account_name"],
+            is_public_company=research_data.get("is_public_company"),
+            facility_count=research_data.get("facility_count"),
+            facility_count_note=research_data.get("facility_count_note"),
+            total_sqft_estimate=research_data.get("total_sqft_estimate"),
+            sqft_source=research_data.get("sqft_source"),
+            board_initiatives=research_data.get("board_initiatives", []),
+            company_priorities=research_data.get("company_priorities", []),
+            trigger_events=research_data.get("trigger_events", []),
+            automation_vendors=research_data.get("automation_vendors", []),
+            exception_tax=research_data.get("exception_tax"),
+            research_gaps=research_data.get("research_gaps", []),
+            documents_used=research_data.get("documents_used", []),
+            raw_research_text=research_data.get("raw_research_text", ""),
+        )
+        db.add(cr_row)
 
-        # Persist personas to DB
-        for p in personas:
-            persona_row = Persona(
-                id=p["id"],
-                session_id=session_id,
-                apollo_id=p.get("apollo_id"),
-                first_name=p["first_name"],
-                last_name=p["last_name"],
-                title=p["title"],
-                email=p.get("email"),
-                linkedin_url=p.get("linkedin_url"),
-                account_name=p["account_name"],
-                persona_type=p["persona_type"],
-                seniority=p["seniority"],
-                outreach_lane=p["outreach_lane"],
-                priority_score=p["priority_score"],
-                linkedin_signals=p.get("linkedin_signals", []),
-                status="discovered",
-            )
-            db.merge(persona_row)
-
-        session.phase = 2
+        session.phase = 3
+        session.phase_label = "research_complete"
         db.commit()
 
-        log_event(session_id, "discovery_complete", 2, user_id, {"persona_count": len(personas)})
+        log_event(session_id, "research_complete", 2, user_id, {
+            "facility_count": research_data.get("facility_count"),
+            "initiative_count": len(research_data.get("board_initiatives", [])),
+            "gap_count": len(research_data.get("research_gaps", [])),
+        })
+
+        # Replace progress message with full research brief
+        brief_blocks = research_brief_card(research_data, session_id)
+        if progress_ts:
+            client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                blocks=brief_blocks,
+                text=f"Research brief ready for {account_name}",
+            )
+        else:
+            say(blocks=brief_blocks, text=f"Research brief for {account_name}", thread_ts=thread_ts)
+
+    except Exception as e:
+        logger.error(f"Phase 2 research failed for session {session_id}: {e}", exc_info=True)
+        say(text="Something went wrong during research. Please try again.", thread_ts=thread_ts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Contact Sourcing (triggered by "Find contacts" button)
+# ---------------------------------------------------------------------------
+
+@app.action("find_contacts")
+def handle_find_contacts(ack, body, say, client):
+    ack()
+    session_id = body["actions"][0]["value"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    # Container message ts is the research brief message; thread_ts is the thread root
+    thread_ts = body.get("container", {}).get("message_ts") or body["message"]["ts"]
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if not session:
+            say(text="Session not found.", thread_ts=thread_ts)
+            return
+
+        work_thread = session.thread_ts or thread_ts
+        session.phase = 4
+        session.phase_label = "contacts_sourcing"
+        db.commit()
+
+        say(text="Pulling contacts from Apollo...", thread_ts=work_thread)
+
+        normalized = session.normalized_request or {}
+        contacts = discovery.discover(
+            session_id=session_id,
+            account_name=session.account_name,
+            persona_filter=normalized.get("persona_filter"),
+        )
+
+        if not contacts:
+            say(
+                text=(
+                    f"I couldn't find any contacts at *{session.account_name}* in Apollo. "
+                    "Check the account name or try a different company."
+                ),
+                thread_ts=work_thread,
+            )
+            log_event(session_id, "discovery_empty", 3, user_id, {})
+            return
+
+        for c in contacts:
+            row = Persona(
+                id=c["id"],
+                session_id=session_id,
+                apollo_id=c.get("apollo_id"),
+                first_name=c["first_name"],
+                last_name=c["last_name"],
+                title=c["title"],
+                email=c.get("email"),
+                linkedin_url=c.get("linkedin_url"),
+                account_name=c["account_name"],
+                persona_type=c["persona_type"],
+                seniority=c["seniority"],
+                outreach_lane=c["outreach_lane"],
+                priority_score=c["priority_score"],
+                linkedin_signals=c.get("linkedin_signals", []),
+                deep_research_flagged=False,
+                status="discovered",
+            )
+            db.merge(row)
+
+        session.phase_label = "contacts_sourced"
+        db.commit()
+
+        log_event(session_id, "contacts_sourced", 3, user_id, {"contact_count": len(contacts)})
 
         say(
-            blocks=persona_list_card(personas, session_id),
-            text=f"Found {len(personas)} personas at {account_name}. Select who to include:",
-            thread_ts=thread_ts,
+            blocks=contact_list_card(contacts, session_id, flagged_ids=set()),
+            text=f"Found {len(contacts)} contacts at {session.account_name}.",
+            thread_ts=work_thread,
         )
 
     except Exception as e:
-        logger.error(f"Phase 2 failed for session {session_id}: {e}", exc_info=True)
-        say(text="Something went wrong during persona discovery. Please try again.", thread_ts=thread_ts)
+        logger.error(f"handle_find_contacts failed for session {session_id}: {e}", exc_info=True)
+        say(text="Something went wrong pulling contacts. Please try again.", thread_ts=thread_ts)
 
 
-# Acknowledge persona checkbox interactions (state is read at confirm time)
-@app.action(re.compile(r"approve_persona_.*"))
-def handle_persona_checkbox(ack, body):
+# ---------------------------------------------------------------------------
+# Contact flag toggle (⭐ button per contact row)
+# ---------------------------------------------------------------------------
+
+@app.action(re.compile(r"flag_contact_.*"))
+def handle_flag_contact(ack, body, client):
     ack()
+    value = body["actions"][0]["value"]  # "session_id:persona_id"
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    message_ts = body["message"]["ts"]
+
+    try:
+        session_id, persona_id = value.split(":", 1)
+        db = next(get_db())
+
+        persona = db.query(Persona).filter(Persona.id == persona_id).first()
+        if not persona:
+            return
+
+        # Count currently flagged contacts (excluding this one)
+        flagged_count = (
+            db.query(Persona)
+            .filter(
+                Persona.session_id == session_id,
+                Persona.deep_research_flagged == True,
+                Persona.id != persona_id,
+            )
+            .count()
+        )
+
+        # Enforce cap of 3
+        if not persona.deep_research_flagged and flagged_count >= 3:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text="You've flagged 3 contacts — that's the max. Remove a flag before adding another.",
+                thread_ts=message_ts,
+            )
+            return
+
+        persona.deep_research_flagged = not persona.deep_research_flagged
+        db.commit()
+
+        # Re-render the contact list with updated flags
+        all_contacts = (
+            db.query(Persona)
+            .filter(Persona.session_id == session_id, Persona.status == "discovered")
+            .all()
+        )
+        contacts_dicts = [
+            {
+                "id": p.id, "first_name": p.first_name, "last_name": p.last_name,
+                "title": p.title, "persona_type": p.persona_type,
+                "outreach_lane": p.outreach_lane, "priority_score": p.priority_score,
+                "account_name": p.account_name,
+            }
+            for p in all_contacts
+        ]
+        flagged_ids = {p.id for p in all_contacts if p.deep_research_flagged}
+
+        client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=contact_list_card(contacts_dicts, session_id, flagged_ids=flagged_ids),
+            text=f"Contact list updated — {len(flagged_ids)}/3 flagged for deep research.",
+        )
+
+    except Exception as e:
+        logger.error(f"handle_flag_contact failed: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Checkpoint 1: persona approval → scoring → sequence generation
+# Phase 4–5 — Approve contacts → individual research + scoring + generation
 # ---------------------------------------------------------------------------
 
-@app.action("confirm_personas")
-def handle_confirm_personas(ack, body, say):
+@app.action("approve_contacts")
+def handle_approve_contacts(ack, body, say, client):
     ack()
     session_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
 
-    # Collect selected persona IDs from checkbox state
-    selected_ids = []
-    state_values = body.get("state", {}).get("values", {})
-    for block_values in state_values.values():
-        for action_id, action_data in block_values.items():
-            if action_id.startswith("approve_persona_"):
-                for opt in action_data.get("selected_options", []):
-                    selected_ids.append(opt["value"])
-
-    if not selected_ids:
-        say(text="Please select at least one persona before confirming.", thread_ts=thread_ts)
-        return
-
     try:
         db = next(get_db())
-
-        # Mark approved / rejected
-        all_personas = db.query(Persona).filter(Persona.session_id == session_id).all()
-        for p in all_personas:
-            p.approved_by_rep = p.id in selected_ids
-            p.status = "approved" if p.id in selected_ids else "rejected"
-
         session = db.query(Session).filter(Session.id == session_id).first()
-        if session:
-            session.phase = 3
-            # Keep thread_ts in sync if it was set here
-            if not session.thread_ts:
-                session.thread_ts = thread_ts
-        db.commit()
+        if not session:
+            say(text="Session not found.", thread_ts=thread_ts)
+            return
 
-        log_event(session_id, "personas_approved", 2, user_id, {
-            "selected_count": len(selected_ids),
-            "selected_ids": selected_ids,
-        })
+        work_thread = session.thread_ts or thread_ts
 
-        say(
-            text=f"Got it — {len(selected_ids)} persona(s) confirmed. Researching account and generating sequences...",
-            thread_ts=thread_ts,
-        )
-
-        account_name = session.account_name if session else ""
-        normalized = (session.normalized_request or {}) if session else {}
-        account_domain = normalized.get("account_domain") or (session.account_domain if session else "")
-        account_description = normalized.get("company_description")
-
-        # --- Exa account research (best-effort) ---
-        exa_signals = exa.research_account(account_name, account_domain or None)
-        if exa_signals:
-            # Attach signals to normalized_request for scorer context
-            if session:
-                nr = dict(session.normalized_request or {})
-                nr["exa_signals"] = exa_signals
-                session.normalized_request = nr
-                db.commit()
-            logger.info(f"[main] Exa returned {len(exa_signals)} signals for '{account_name}'")
-
-        # --- Google Drive account plan (best-effort) ---
-        account_plan_text = drive.find_account_plan(account_name)
-        if account_plan_text and session:
-            nr = dict(session.normalized_request or {})
-            nr["account_plan_text"] = account_plan_text[:4000]
-            session.normalized_request = nr
-            db.commit()
-            logger.info(f"[main] Drive account plan found for '{account_name}'")
-
-        # Load approved personas
-        approved_personas = (
+        all_personas = (
             db.query(Persona)
-            .filter(Persona.session_id == session_id, Persona.status == "approved")
+            .filter(Persona.session_id == session_id, Persona.status == "discovered")
             .all()
         )
-        personas_dicts = [
+
+        if not all_personas:
+            say(text="No contacts found. Please start over.", thread_ts=work_thread)
+            return
+
+        for p in all_personas:
+            p.status = "approved"
+            p.approved_by_rep = True
+        db.commit()
+
+        flagged_contacts = [p for p in all_personas if p.deep_research_flagged]
+        flagged_dicts = [
             {
-                "id": p.id,
-                "first_name": p.first_name,
-                "last_name": p.last_name,
-                "title": p.title,
-                "seniority": p.seniority,
-                "persona_type": p.persona_type,
-                "outreach_lane": p.outreach_lane,
-                "priority_score": p.priority_score,
-                "linkedin_signals": p.linkedin_signals or [],
-                "gong_hook": p.gong_hook,
-                "account_name": p.account_name,
+                "id": p.id, "first_name": p.first_name, "last_name": p.last_name,
+                "title": p.title, "account_name": p.account_name, "session_id": session_id,
             }
-            for p in approved_personas
+            for p in flagged_contacts
         ]
 
-        # Score + value-map (passes exa_signals and account_plan_text for richer hooks)
+        session.phase = 5
+        session.phase_label = "individual_research"
+        db.commit()
+
+        log_event(session_id, "contacts_approved", 4, user_id, {
+            "total": len(all_personas),
+            "flagged": len(flagged_contacts),
+        })
+
+        # ------------------------------------------------------------------
+        # Individual research for flagged contacts (parallel)
+        # ------------------------------------------------------------------
+        contact_research_map = {}
+        if flagged_dicts:
+            say(
+                text=f"Running deep research on {len(flagged_dicts)} flagged contact(s)...",
+                thread_ts=work_thread,
+            )
+            raw_contact_research = contact_researcher_agent.research_contacts(
+                contacts=flagged_dicts,
+            )
+            for persona_id, cr_data in raw_contact_research.items():
+                cr_row = ContactResearch(
+                    id=cr_data["id"],
+                    persona_id=persona_id,
+                    session_id=session_id,
+                    current_role_tenure=cr_data.get("current_role_tenure"),
+                    prior_roles=cr_data.get("prior_roles", []),
+                    recent_linkedin=cr_data.get("recent_linkedin", []),
+                    speaking_activity=cr_data.get("speaking_activity"),
+                    research_gaps=cr_data.get("research_gaps", []),
+                )
+                db.add(cr_row)
+                contact_research_map[persona_id] = cr_data
+            db.commit()
+
+        # ------------------------------------------------------------------
+        # Load company research for sequence context
+        # ------------------------------------------------------------------
+        cr_db = (
+            db.query(CompanyResearch)
+            .filter(CompanyResearch.session_id == session_id)
+            .order_by(CompanyResearch.created_at.desc())
+            .first()
+        )
+        company_research = None
+        if cr_db:
+            company_research = {
+                "account_name": cr_db.account_name,
+                "facility_count": cr_db.facility_count,
+                "board_initiatives": cr_db.board_initiatives or [],
+                "trigger_events": cr_db.trigger_events or [],
+                "exception_tax": cr_db.exception_tax,
+            }
+
+        # ------------------------------------------------------------------
+        # Scoring
+        # ------------------------------------------------------------------
+        normalized = session.normalized_request or {}
+        account_description = normalized.get("company_description")
+
+        account_plan_text = None
+        try:
+            account_plan_text = drive.find_account_plan(session.account_name)
+        except Exception:
+            pass
+
+        personas_dicts = [
+            {
+                "id": p.id, "first_name": p.first_name, "last_name": p.last_name,
+                "title": p.title, "seniority": p.seniority, "persona_type": p.persona_type,
+                "outreach_lane": p.outreach_lane, "priority_score": p.priority_score,
+                "linkedin_signals": p.linkedin_signals or [], "gong_hook": p.gong_hook,
+                "account_name": p.account_name,
+            }
+            for p in all_personas
+        ]
+
         scored_personas = scorer.score(
             personas_dicts,
             account_description=account_description,
-            exa_signals=exa_signals,
             account_plan_text=account_plan_text,
         )
 
-        # Update DB with scoring results
         for sp in scored_personas:
-            db_persona = db.query(Persona).filter(Persona.id == sp["id"]).first()
-            if db_persona:
-                db_persona.priority_score = sp["priority_score"]
-                db_persona.score_reasoning = sp.get("score_reasoning")
-                db_persona.value_driver = sp.get("value_driver")
+            db_p = db.query(Persona).filter(Persona.id == sp["id"]).first()
+            if db_p:
+                db_p.priority_score = sp["priority_score"]
+                db_p.score_reasoning = sp.get("score_reasoning")
+                db_p.value_driver = sp.get("value_driver")
         db.commit()
 
-        # Generate sequences
+        # ------------------------------------------------------------------
+        # Sequence generation
+        # ------------------------------------------------------------------
+        say(text="Generating sequences...", thread_ts=work_thread)
+
         sequences = []
         for sp in scored_personas:
+            cr = contact_research_map.get(sp["id"])
             seq = generator.generate(
                 persona=sp,
-                account_name=account_name,
+                account_name=session.account_name,
                 account_description=account_description,
                 rep_name="Your Rep",
                 session_id=session_id,
+                company_research=company_research,
+                contact_research=cr,
             )
             sequences.append(seq)
 
@@ -367,33 +595,35 @@ def handle_confirm_personas(ack, body, say):
                 session_id=session_id,
                 persona_id=sp["id"],
                 lane=seq["lane"],
+                personalization_tier=seq.get("personalization_tier", "standard"),
                 status="rep_review",
                 steps=seq["steps"],
                 edit_history=[],
             )
             db.add(seq_row)
 
-        if session:
-            session.phase = 4
+        session.phase = 6
+        session.phase_label = "sequences_draft"
         db.commit()
 
-        log_event(session_id, "sequences_generated", 3, user_id, {
-            "sequence_count": len(sequences),
-        })
+        log_event(session_id, "sequences_generated", 5, user_id, {"count": len(sequences)})
 
-        # Post each sequence for rep review
+        # Post each sequence for review
         for seq in sequences:
-            persona_match = next((p for p in scored_personas if p["id"] == seq["persona_id"]), {})
-            name = f"{persona_match.get('first_name', '')} {persona_match.get('last_name', '')}".strip()
+            match = next((p for p in scored_personas if p["id"] == seq["persona_id"]), {})
+            name = f"{match.get('first_name', '')} {match.get('last_name', '')}".strip()
             lane = seq["lane"]
+            tier_badge = " ⭐" if seq.get("personalization_tier") == "deep" else ""
 
             all_blocks = [{
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"Sequence: {name} ({lane} lane)"},
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Sequence: {name} ({lane} lane{tier_badge})",
+                },
             }]
             for step in seq["steps"]:
                 all_blocks.extend(sequence_step_card(step, name, seq["id"]))
-
             all_blocks.append({
                 "type": "actions",
                 "block_id": f"approve_sequence_{seq['id']}",
@@ -406,22 +636,21 @@ def handle_confirm_personas(ack, body, say):
                 }],
             })
 
-            say(blocks=all_blocks, text=f"Sequence for {name}", thread_ts=thread_ts)
+            say(blocks=all_blocks, text=f"Sequence for {name}", thread_ts=work_thread)
 
     except Exception as e:
-        logger.error(f"confirm_personas failed for session {session_id}: {e}", exc_info=True)
-        say(text="Something went wrong saving your selections. Please try again.", thread_ts=thread_ts)
+        logger.error(f"approve_contacts failed for session {session_id}: {e}", exc_info=True)
+        say(text="Something went wrong. Please try again.", thread_ts=thread_ts)
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 — Checkpoint 2: step-level edit loop
+# Sequence edit loop
 # ---------------------------------------------------------------------------
 
 @app.action(re.compile(r"edit_step_.*"))
 def handle_edit_step(ack, body, client):
-    """Rep clicks Edit on a step — open a modal to capture their instruction."""
     ack()
-    value = body["actions"][0]["value"]  # "sequence_id:step_number"
+    value = body["actions"][0]["value"]
     trigger_id = body["trigger_id"]
 
     try:
@@ -437,7 +666,6 @@ def handle_edit_step(ack, body, client):
         if not step:
             return
 
-        # Get thread_ts from session so the modal submit can post back to the right thread
         session = db.query(Session).filter(Session.id == seq.session_id).first()
         thread_ts = (session.thread_ts or "") if session else ""
 
@@ -452,10 +680,9 @@ def handle_edit_step(ack, body, client):
 
 @app.view("edit_step_modal_submit")
 def handle_edit_modal_submit(ack, body, client, say):
-    """Rep submits the edit modal — apply the edit and re-post the updated step."""
     ack()
     user_id = body["user"]["id"]
-    metadata = body["view"]["private_metadata"]  # "sequence_id:step_number:thread_ts"
+    metadata = body["view"]["private_metadata"]
     state = body["view"]["state"]["values"]
 
     try:
@@ -467,7 +694,11 @@ def handle_edit_modal_submit(ack, body, client, say):
         instruction = state["edit_instruction"]["instruction_input"]["value"] or ""
         edit_field = "body"
         if "edit_field_select" in state:
-            edit_field = state["edit_field_select"]["field_select"].get("selected_option", {}).get("value", "body")
+            edit_field = (
+                state["edit_field_select"]["field_select"]
+                .get("selected_option", {})
+                .get("value", "body")
+            )
 
         db = next(get_db())
         seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
@@ -481,9 +712,8 @@ def handle_edit_modal_submit(ack, body, client, say):
 
         original_step = steps[step_idx]
         updated_step = editor.apply_edit(original_step, instruction, edit_field)
-        updated_step["status"] = "draft"  # reset approval on edit
+        updated_step["status"] = "draft"
 
-        # Record edit history
         history = list(seq.edit_history or [])
         history.append({
             "timestamp": datetime.utcnow().isoformat(),
@@ -499,17 +729,14 @@ def handle_edit_modal_submit(ack, body, client, say):
         seq.edit_history = history
         db.commit()
 
-        log_event(seq.session_id, "step_edited", 4, user_id, {
+        log_event(seq.session_id, "step_edited", 6, user_id, {
             "sequence_id": sequence_id,
             "step_number": step_number,
-            "instruction": instruction,
         })
 
-        # Get persona name for display
         persona = db.query(Persona).filter(Persona.id == seq.persona_id).first()
         persona_name = f"{persona.first_name} {persona.last_name}".strip() if persona else ""
 
-        # Get channel_id from session
         session = db.query(Session).filter(Session.id == seq.session_id).first()
         channel_id = session.channel_id if session else None
 
@@ -524,7 +751,6 @@ def handle_edit_modal_submit(ack, body, client, say):
                 }
             ]
             updated_blocks.extend(sequence_step_card(updated_step, persona_name, sequence_id))
-
             client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
@@ -538,9 +764,8 @@ def handle_edit_modal_submit(ack, body, client, say):
 
 @app.action(re.compile(r"approve_step_.*"))
 def handle_approve_step(ack, body, say):
-    """Rep approves an individual step."""
     ack()
-    value = body["actions"][0]["value"]  # "sequence_id:step_number"
+    value = body["actions"][0]["value"]
     thread_ts = body["message"]["ts"]
 
     try:
@@ -570,12 +795,11 @@ def handle_approve_step(ack, body, say):
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Checkpoint 2: full sequence approval → brief delivery
+# Sequence approval → brief delivery
 # ---------------------------------------------------------------------------
 
 @app.action("approve_sequence")
 def handle_approve_sequence(ack, body, say):
-    """Rep approves the full sequence — delivers the final brief."""
     ack()
     sequence_id = body["actions"][0]["value"]
     user_id = body["user"]["id"]
@@ -591,15 +815,16 @@ def handle_approve_sequence(ack, body, say):
         seq.status = "approved"
         session = db.query(Session).filter(Session.id == seq.session_id).first()
         if session:
-            session.phase = 5
+            session.phase = 7
+            session.phase_label = "sequences_approved"
 
         persona = db.query(Persona).filter(Persona.id == seq.persona_id).first()
         db.commit()
 
-        log_event(seq.session_id, "sequence_approved", 4, user_id, {"sequence_id": sequence_id})
+        log_event(seq.session_id, "sequence_approved", 6, user_id, {"sequence_id": sequence_id})
 
         if not persona:
-            say(text="Sequence approved, but persona record not found for brief.", thread_ts=thread_ts)
+            say(text="Sequence approved, but persona record not found.", thread_ts=thread_ts)
             return
 
         persona_dict = {
@@ -608,10 +833,7 @@ def handle_approve_sequence(ack, body, say):
             "title": persona.title,
             "account_name": persona.account_name,
         }
-        sequence_dict = {
-            "lane": seq.lane,
-            "steps": seq.steps or [],
-        }
+        sequence_dict = {"lane": seq.lane, "steps": seq.steps or []}
 
         say(
             blocks=sequence_brief_card(sequence_dict, persona_dict),
@@ -621,7 +843,103 @@ def handle_approve_sequence(ack, body, say):
 
     except Exception as e:
         logger.error(f"approve_sequence failed for {sequence_id}: {e}", exc_info=True)
-        say(text="Something went wrong delivering the sequence brief.", thread_ts=thread_ts)
+        say(text="Something went wrong delivering the brief.", thread_ts=thread_ts)
+
+
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+@app.action("resume_session")
+def handle_resume_session(ack, body, say):
+    ack()
+    session_id = body["actions"][0]["value"]
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if not session:
+            say(text="Session not found. Please start a new request.")
+            return
+
+        phase = session.phase
+
+        if phase <= 3:
+            cr_db = (
+                db.query(CompanyResearch)
+                .filter(CompanyResearch.session_id == session_id)
+                .order_by(CompanyResearch.created_at.desc())
+                .first()
+            )
+            if cr_db:
+                research_data = {
+                    "account_name": cr_db.account_name,
+                    "facility_count": cr_db.facility_count,
+                    "facility_count_note": cr_db.facility_count_note,
+                    "board_initiatives": cr_db.board_initiatives or [],
+                    "company_priorities": cr_db.company_priorities or [],
+                    "trigger_events": cr_db.trigger_events or [],
+                    "automation_vendors": cr_db.automation_vendors or [],
+                    "exception_tax": cr_db.exception_tax,
+                    "research_gaps": cr_db.research_gaps or [],
+                }
+                say(
+                    blocks=research_brief_card(research_data, session_id),
+                    text=f"Resuming {session.account_name} — here's the research brief.",
+                )
+            else:
+                say(text=f"Resuming *{session.account_name}*. Research is in progress.")
+
+        elif phase == 4:
+            contacts = (
+                db.query(Persona)
+                .filter(Persona.session_id == session_id, Persona.status == "discovered")
+                .all()
+            )
+            contacts_dicts = [
+                {
+                    "id": p.id, "first_name": p.first_name, "last_name": p.last_name,
+                    "title": p.title, "persona_type": p.persona_type,
+                    "outreach_lane": p.outreach_lane, "priority_score": p.priority_score,
+                    "account_name": p.account_name,
+                }
+                for p in contacts
+            ]
+            flagged_ids = {p.id for p in contacts if p.deep_research_flagged}
+            say(
+                blocks=contact_list_card(contacts_dicts, session_id, flagged_ids=flagged_ids),
+                text=f"Resuming *{session.account_name}* — here's your contact list.",
+            )
+
+        else:
+            say(
+                text=(
+                    f"Resuming *{session.account_name}*. "
+                    "Sequences are generated — scroll up in the thread to review, "
+                    "or tell me what you'd like to change."
+                ),
+                thread_ts=session.thread_ts,
+            )
+
+    except Exception as e:
+        logger.error(f"handle_resume_session failed: {e}", exc_info=True)
+        say(text="Something went wrong resuming your session.")
+
+
+@app.action("cancel_session")
+def handle_cancel_session(ack, body, say):
+    ack()
+    session_id = body["actions"][0]["value"]
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if session:
+            session.status = "cancelled"
+            db.commit()
+        say(text="Session cancelled. Send me a new account name to start fresh.")
+    except Exception as e:
+        logger.error(f"handle_cancel_session failed: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +950,7 @@ def handle_approve_sequence(ack, body, say):
 def handle_edit_intent(ack, body, say):
     ack()
     say(
-        text="No problem — tell me what to change. Which account did you want to target?",
+        text="No problem — which account did you want to target?",
         thread_ts=body["message"]["ts"],
     )
 
@@ -668,6 +986,12 @@ def handle_submit_clarification(ack, body, say, client):
         ),
         text=f"Got it — {normalized.account_name}. Is that right?",
     )
+
+
+# Acknowledge any leftover persona checkbox interactions from old sessions
+@app.action(re.compile(r"approve_persona_.*"))
+def handle_persona_checkbox(ack, body):
+    ack()
 
 
 if __name__ == "__main__":
