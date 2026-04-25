@@ -13,30 +13,43 @@ EXA_CONTENTS_URL = "https://api.exa.ai/contents"
 # Domains to exclude — avoid generic aggregators that won't have account-specific signals
 EXCLUDE_DOMAINS = [
     "facebook.com", "twitter.com", "x.com",
-    "wikipedia.org", "crunchbase.com", "bloomberg.com",
+    "wikipedia.org", "reddit.com", "quora.com",
+    "glassdoor.com", "indeed.com", "ziprecruiter.com",
 ]
 
 # Deep-research query templates per topic
 _RESEARCH_QUERIES = {
     "earnings_board": (
-        "{company} earnings call investor day strategic priorities "
-        "annual report board initiatives 2024 2025"
+        "{company} earnings call investor day strategic priorities supply chain "
+        "operations distribution 2024 2025"
+    ),
+    "earnings_board_alt": (
+        "{company} annual report CEO CFO letter shareholders operational priorities "
+        "cost reduction automation 2024 2025"
     ),
     "press_releases": (
-        "{company} press release announcement expansion acquisition "
-        "new facility investment 2024 2025"
+        "{company} press release announcement new distribution center warehouse "
+        "expansion acquisition partnership 2024 2025"
     ),
     "facilities": (
-        "{company} distribution center warehouse DC locations count "
-        "square feet logistics network"
+        "{company} number of distribution centers fulfillment centers warehouses "
+        "square footage logistics network locations"
+    ),
+    "facilities_alt": (
+        "{company} warehouse network DC count square feet facility expansion "
+        "real estate supply chain footprint"
     ),
     "automation": (
-        "{company} WMS warehouse management system automation robotics "
-        "inventory technology deployment Blue Yonder Manhattan SAP"
+        "{company} WMS warehouse management system Blue Yonder Manhattan SAP "
+        "automation robotics inventory technology deployment"
     ),
     "triggers": (
-        "{company} inventory shrinkage audit leadership change "
-        "supply chain investment warehouse technology job posting 2024 2025"
+        "{company} inventory shrink accuracy audit failure supply chain disruption "
+        "new VP operations leadership hire expansion 2024 2025"
+    ),
+    "hiring": (
+        "{company} hiring job opening director manager automation engineer "
+        "inventory control continuous improvement supply chain 2024 2025"
     ),
     "contact": (
         '"{first_name} {last_name}" {company} {title} '
@@ -111,12 +124,19 @@ class ExaClient:
         company_name: str,
         topic: str,
         extra_tokens: Optional[dict] = None,
-        num_results: int = 4,
+        num_results: int = 6,
+        fetch_top_content: bool = False,
+        include_domain: Optional[str] = None,
+        also_run_alt: bool = False,
     ) -> list[dict]:
         """
         Run a targeted search for one of the defined research topics.
         topic must be a key in _RESEARCH_QUERIES.
-        Returns list of {headline, snippet, url, date}.
+        Returns list of {headline, snippet, url, date, full_content?}.
+
+        fetch_top_content: if True, fetches full article text for the top result.
+        include_domain: narrows search to this domain (e.g. the company's IR site).
+        also_run_alt: if True, also runs the _alt variant of the query and merges results.
         """
         if not self.api_key:
             return []
@@ -127,9 +147,27 @@ class ExaClient:
             tokens.update(extra_tokens)
 
         query = template.format(**tokens)
-        results = self._search(query=query, num_results=num_results)
+        results = self._search(
+            query=query,
+            num_results=num_results,
+            include_domain=include_domain,
+        )
 
-        return [
+        # Optional alternate query for the same topic (different angle)
+        if also_run_alt:
+            alt_template = _RESEARCH_QUERIES.get(f"{topic}_alt")
+            if alt_template:
+                alt_query = alt_template.format(**tokens)
+                alt_results = self._search(
+                    query=alt_query,
+                    num_results=num_results // 2,
+                    include_domain=include_domain,
+                )
+                # Merge, deduplicate by URL
+                seen_urls = {r.get("url") for r in results}
+                results += [r for r in alt_results if r.get("url") not in seen_urls]
+
+        hits = [
             {
                 "headline": r.get("title", ""),
                 "snippet": self._best_highlight(r),
@@ -139,6 +177,17 @@ class ExaClient:
             for r in results
             if r.get("title") or r.get("highlights")
         ]
+
+        # Fetch full article text for the top result (highest-value content)
+        if fetch_top_content and hits:
+            top_url = hits[0].get("url", "")
+            if top_url:
+                content = self.fetch_url_content(top_url, max_chars=5_000)
+                if content:
+                    hits[0]["full_content"] = content
+                    logger.info(f"[exa] Fetched full content for '{topic}' top result: {top_url[:80]}")
+
+        return hits
 
     def fetch_url_content(self, url: str, max_chars: int = 20_000) -> str:
         """

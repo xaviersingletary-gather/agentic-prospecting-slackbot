@@ -1,5 +1,6 @@
 from typing import Optional
 
+
 # ---------------------------------------------------------------------------
 # Research progress blocks — updated in place via chat.update
 # ---------------------------------------------------------------------------
@@ -28,7 +29,6 @@ def research_progress_blocks(account_name: str, steps: list) -> list:
 def research_brief_card(research: dict, session_id: str) -> list:
     """
     Full research brief posted after company research completes.
-    Includes a 'Find contacts' button to advance to Checkpoint 2.
     """
     account_name = research.get("account_name", "")
     facility_count = research.get("facility_count")
@@ -39,6 +39,7 @@ def research_brief_card(research: dict, session_id: str) -> list:
     automation_vendors = research.get("automation_vendors") or []
     exception_tax = research.get("exception_tax") or {}
     research_gaps = research.get("research_gaps") or []
+    documents_used = research.get("documents_used") or []
 
     blocks = [
         {
@@ -94,11 +95,18 @@ def research_brief_card(research: dict, session_id: str) -> list:
     # --- Trigger events ---
     if trigger_events:
         trigger_lines = []
-        for t in trigger_events[:2]:
+        for t in trigger_events[:5]:
             date_str = f" ({t.get('date', '')})" if t.get("date") else ""
-            src_str = f" — _{t.get('source', '')}_" if t.get("source") else ""
+            src = t.get("source", "")
+            if src and src.startswith("http"):
+                src_str = f" — <{src}|source>"
+            elif src:
+                src_str = f" — _{src}_"
+            else:
+                src_str = ""
+            relevance = f"\n  _↳ {t.get('relevance', '')}_" if t.get("relevance") else ""
             trigger_lines.append(
-                f"• {t.get('description', '')}{date_str}{src_str}"
+                f"• {t.get('description', '')}{date_str}{src_str}{relevance}"
             )
         blocks.append({
             "type": "section",
@@ -159,22 +167,148 @@ def research_brief_card(research: dict, session_id: str) -> list:
             },
         })
 
-    blocks += [
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "block_id": f"research_actions_{session_id}",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Find contacts →"},
-                    "style": "primary",
-                    "action_id": "find_contacts",
-                    "value": session_id,
+    # --- Sources ---
+    sec_docs = [d for d in documents_used if d.get("doc_type") in ("10-K", "20-F")]
+    web_docs = [d for d in documents_used if d.get("doc_type", "").startswith("Web:")]
+
+    source_lines = []
+    for doc in sec_docs:
+        form = doc.get("doc_type", "Filing")
+        period = doc.get("filing_period", "")
+        entity = doc.get("entity_name", "")
+        url = doc.get("source_url", "")
+        label = f"{form} ({period})" if period else form
+        if entity:
+            label += f" — {entity}"
+        source_lines.append(f"• <{url}|{label}>" if url else f"• {label}")
+
+    for doc in web_docs[:3]:
+        topic = doc.get("doc_type", "Web").replace("Web: ", "")
+        url = doc.get("source_url", "")
+        date = doc.get("filing_period", "")
+        date_str = f" ({date})" if date else ""
+        source_lines.append(f"• <{url}|{topic}>{date_str}" if url else f"• {topic}")
+
+    if source_lines:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Sources*\n" + "\n".join(source_lines),
+            },
+        })
+    else:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "_Sources: Exa web search (no SEC filing found)_"}],
+        })
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Contact list with deep-research flag buttons — Checkpoint 2
+# ---------------------------------------------------------------------------
+
+def sales_play_card(play_data: dict, account_name: str) -> list:
+    """
+    Render the AE game plan card from SalesPlayAgent output.
+    Appears between the research brief and the contact list.
+    """
+    if play_data.get("error"):
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*AE Game Plan — {account_name}*\n"
+                        f"_Analysis unavailable: {play_data['error']}_"
+                    ),
                 },
-            ],
+            },
+        ]
+
+    blocks: list = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"AE Game Plan — {account_name}"},
         },
     ]
+
+    def _trunc(text: str, limit: int) -> str:
+        text = (text or "").strip()
+        return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+    icp_fit = _trunc(play_data.get("icp_fit_summary") or "", 160)
+    if icp_fit:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"_{icp_fit}_"},
+        })
+
+    blocks.append({"type": "divider"})
+
+    # Entry point
+    entry = play_data.get("entry_point") or {}
+    if entry:
+        contact_str = ""
+        if entry.get("contact_name"):
+            contact_str = f"\n*Contact:* {entry['contact_name']}"
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*🎯 Start Here — {entry.get('persona_type', '')}*"
+                    f"{contact_str}\n"
+                    f"*Why:* {_trunc(entry.get('rationale', ''), 100)}\n"
+                    f"*First move:* {_trunc(entry.get('first_move', ''), 120)}"
+                ),
+            },
+        })
+        blocks.append({"type": "divider"})
+
+    # Plays
+    plays = play_data.get("plays") or []
+    for i, play in enumerate(plays[:2], 1):
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Play {i}: {play.get('name', '')}*\n"
+                    f"• *Trigger:* {_trunc(play.get('trigger', ''), 80)}\n"
+                    f"• *Target:* {play.get('target_persona', '')}\n"
+                    f"• *Approach:* {_trunc(play.get('approach', ''), 120)}\n"
+                    f"• *Talk track:* _{_trunc(play.get('talk_track', ''), 100)}_\n"
+                    f"• *Hook:* {_trunc(play.get('meeting_hook', ''), 100)}"
+                ),
+            },
+        })
+
+    blocks.append({"type": "divider"})
+
+    fs_path = _trunc(play_data.get("financial_sponsor_path") or "", 200)
+    if fs_path:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*💰 FS Path*\n{fs_path}",
+            },
+        })
+
+    urgency = play_data.get("urgency_drivers") or []
+    if urgency:
+        urgency_lines = "\n".join(f"• {_trunc(u, 80)}" for u in urgency[:2])
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*⚡ Urgency*\n{urgency_lines}",
+            },
+        })
 
     return blocks
 
@@ -227,6 +361,15 @@ def contact_list_card(contacts: list, session_id: str, flagged_ids: set = None) 
         if is_flagged:
             flag_element["style"] = "primary"
 
+        email = c.get("email") or ""
+        linkedin_url = c.get("linkedin_url") or ""
+        detail_parts = []
+        if email:
+            detail_parts.append(f"📧 {email}")
+        if linkedin_url:
+            detail_parts.append(f"<{linkedin_url}|💼 LinkedIn>")
+        detail_line = ("  |  ".join(detail_parts)) if detail_parts else ""
+
         blocks.append({
             "type": "section",
             "block_id": f"contact_{pid}",
@@ -235,6 +378,7 @@ def contact_list_card(contacts: list, session_id: str, flagged_ids: set = None) 
                 "text": (
                     f"{score_emoji} *{name}* — {title}\n"
                     f"_{ptype}  |  {lane} lane_"
+                    + (f"\n{detail_line}" if detail_line else "")
                 ),
             },
             "accessory": flag_element,
@@ -348,6 +492,72 @@ def confirmation_card(
                     "action_id": "edit_intent",
                     "value": session_id,
                 },
+            ],
+        },
+    ]
+
+
+def edit_confirmation_card(
+    account_name: str,
+    persona_filter: Optional[list],
+    use_case_angle: Optional[str],
+    session_id: str,
+) -> list:
+    persona_text = ", ".join(persona_filter) if persona_filter else ""
+    angle_text = use_case_angle or ""
+
+    account_element: dict = {"type": "plain_text_input", "action_id": "edit_account_input"}
+    if account_name:
+        account_element["initial_value"] = account_name
+
+    personas_element: dict = {
+        "type": "plain_text_input",
+        "action_id": "edit_personas_input",
+        "placeholder": {"type": "plain_text", "text": "e.g. TDM, ODM — leave blank for all"},
+    }
+    if persona_text:
+        personas_element["initial_value"] = persona_text
+
+    angle_element: dict = {
+        "type": "plain_text_input",
+        "action_id": "edit_angle_input",
+        "placeholder": {"type": "plain_text", "text": "e.g. inventory accuracy, labor reduction"},
+    }
+    if angle_text:
+        angle_element["initial_value"] = angle_text
+
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*Edit your request:*"}},
+        {
+            "type": "input",
+            "block_id": f"edit_account_{session_id}",
+            "element": account_element,
+            "label": {"type": "plain_text", "text": "Account"},
+        },
+        {
+            "type": "input",
+            "block_id": f"edit_personas_{session_id}",
+            "optional": True,
+            "element": personas_element,
+            "label": {"type": "plain_text", "text": "Personas (comma-separated, or blank for all)"},
+        },
+        {
+            "type": "input",
+            "block_id": f"edit_angle_{session_id}",
+            "optional": True,
+            "element": angle_element,
+            "label": {"type": "plain_text", "text": "Outreach angle (or blank for general)"},
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Save"},
+                    "style": "primary",
+                    "action_id": "submit_edit",
+                    "value": session_id,
+                }
             ],
         },
     ]
@@ -552,6 +762,72 @@ def edit_step_modal(step: dict, sequence_id: str, thread_ts: str) -> dict:
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
+
+
+def all_sequences_approval_card(
+    session_id: str,
+    persona_names: list,
+    theme_info: Optional[dict] = None,
+) -> list:
+    names_text = "\n".join(f"• {n}" for n in persona_names) if persona_names else "• (no sequences)"
+    blocks = [
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Sequences ready for review:*\n{names_text}\n\n"
+                    "Edit any step above, then approve all when ready."
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": f"approve_all_{session_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve all & deliver briefs"},
+                    "style": "primary",
+                    "action_id": "approve_all_sequences",
+                    "value": session_id,
+                },
+            ],
+        },
+    ]
+    if theme_info and theme_info.get("name"):
+        rationale = theme_info.get("rationale", "")
+        context_text = f"Theme: *{theme_info['name']}*"
+        if rationale:
+            context_text += f" — _{rationale}_"
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": context_text}],
+        })
+    return blocks
+
+
+def session_complete_card(account_name: str, sequence_count: int, persona_names: list) -> list:
+    names_text = ", ".join(persona_names) if persona_names else "N/A"
+    return [
+        {"type": "divider"},
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Done — {account_name}"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*{sequence_count} sequence(s) delivered*\n"
+                    f"*Personas:* {names_text}\n\n"
+                    "Briefs are ready to paste. Start a new account anytime."
+                ),
+            },
+        },
+    ]
 
 
 def sequence_brief_card(sequence: dict, persona: dict) -> list:

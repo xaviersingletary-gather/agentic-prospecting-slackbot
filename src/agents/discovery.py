@@ -89,7 +89,7 @@ def normalize_apollo_person(raw: dict, session_id: str) -> dict:
         "last_name": raw.get("last_name") or "",
         "title": title,
         "email": raw.get("email"),
-        "linkedin_url": raw.get("linkedin_url"),
+        "linkedin_url": raw.get("linkedin_url") or raw.get("linkedin_profile_url") or raw.get("li_url"),
         "account_name": org.get("name") or raw.get("organization_name") or "",
         "persona_type": persona_type,
         "seniority": seniority,
@@ -153,6 +153,7 @@ class PersonaDiscoveryAgent:
         self,
         session_id: str,
         account_name: str,
+        account_domain: Optional[str] = None,
         persona_filter: Optional[list[str]] = None,
     ) -> list[dict]:
         """
@@ -178,6 +179,7 @@ class PersonaDiscoveryAgent:
         # 1. Pull people from Apollo
         raw_people = self.apollo.search_people(
             organization_name=account_name,
+            organization_domain=account_domain,
             persona_types=persona_filter,
             limit=30,  # over-fetch then trim after dedup + sort
         )

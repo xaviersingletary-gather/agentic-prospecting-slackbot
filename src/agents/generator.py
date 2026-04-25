@@ -321,6 +321,7 @@ class SequenceGeneratorAgent:
         session_id: str = "",
         company_research: Optional[dict] = None,
         contact_research: Optional[dict] = None,
+        theme_assignment: Optional[dict] = None,
     ) -> dict:
         """
         Generate a full sequence for a single scored persona.
@@ -332,6 +333,14 @@ class SequenceGeneratorAgent:
 
         # Resolve the opening hook — prefer company research trigger events over gong/LinkedIn
         hook_body, hook_subject = _resolve_hook(persona, company_research)
+
+        # Prepend theme opener if available — theme leads, research hook follows as supporting context
+        if theme_assignment and theme_assignment.get("opener"):
+            hook_body = (
+                f"{theme_assignment['opener']}\n\n{hook_body}"
+                if hook_body
+                else theme_assignment["opener"]
+            )
 
         # DC count — prefer company research over placeholder
         dc_count = "your"

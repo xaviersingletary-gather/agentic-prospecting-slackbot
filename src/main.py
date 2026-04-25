@@ -23,18 +23,24 @@ from src.agents.generator import SequenceGeneratorAgent
 from src.agents.editor import SequenceEditorAgent
 from src.agents.researcher import CompanyResearchAgent
 from src.agents.contact_researcher import ContactResearchAgent
+from src.agents.sales_play import SalesPlayAgent
+from src.agents.theme_router import ThemeRouterAgent, THEMES as CONTENT_THEMES
 from src.integrations.google_drive import GoogleDriveClient
 from src.db.session import init_db, get_db
 from src.db.models import Session, WorkflowEvent, Persona, Sequence, CompanyResearch, ContactResearch
+from sqlalchemy.orm.attributes import flag_modified
 from src.integrations.slack_blocks import (
     confirmation_card,
-    clarification_card,
+    edit_confirmation_card,
     research_progress_blocks,
     research_brief_card,
+    sales_play_card,
     contact_list_card,
     resume_session_card,
     sequence_step_card,
     sequence_brief_card,
+    all_sequences_approval_card,
+    session_complete_card,
     edit_step_modal,
 )
 
@@ -57,6 +63,8 @@ generator = SequenceGeneratorAgent()
 editor = SequenceEditorAgent()
 researcher = CompanyResearchAgent()
 contact_researcher_agent = ContactResearchAgent()
+sales_play_agent = SalesPlayAgent()
+theme_router = ThemeRouterAgent()
 drive = GoogleDriveClient()
 
 REP_ROLES = {}  # slack user_id -> "AE" | "MDR"
@@ -85,7 +93,7 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Message intake + confirmation card (or session resume prompt)
+# Phase 1 — Message intake + confirmation card
 # ---------------------------------------------------------------------------
 
 @app.message()
@@ -94,31 +102,9 @@ def handle_message(message, say, client):
     channel_id = message.get("channel")
     text = message.get("text", "").strip()
 
-    if not text or message.get("bot_id"):
+    if not text or message.get("bot_id") or text.strip().lower() == "clear":
         return
 
-    # Check for an existing active session for this rep
-    try:
-        db = next(get_db())
-        existing = (
-            db.query(Session)
-            .filter(Session.rep_id == user_id, Session.status == "active")
-            .order_by(Session.created_at.desc())
-            .first()
-        )
-        if existing:
-            say(
-                blocks=resume_session_card(existing),
-                text=(
-                    f"You have an active session for {existing.account_name}. "
-                    "Continue or cancel?"
-                ),
-            )
-            return
-    except Exception as e:
-        logger.error(f"Session resume check failed: {e}")
-
-    # No active session — start a new one
     rep_role = get_rep_role(user_id)
     session_id = str(uuid.uuid4())
 
@@ -154,21 +140,28 @@ def handle_message(message, say, client):
 
     log_event(session_id, "session_started", 1, user_id, {"raw_message": text})
 
-    if normalized.clarification_needed:
-        say(
-            blocks=clarification_card(normalized.clarification_question, session_id),
-            text=normalized.clarification_question,
+    # Light warning if other threads are still in progress (non-blocking)
+    try:
+        db = next(get_db())
+        in_progress = (
+            db.query(Session)
+            .filter(Session.rep_id == user_id, Session.status == "active", Session.id != session_id)
+            .count()
         )
-    else:
-        say(
-            blocks=confirmation_card(
-                account_name=normalized.account_name,
-                persona_filter=normalized.persona_filter,
-                use_case_angle=normalized.use_case_angle,
-                session_id=session_id,
-            ),
-            text=f"Got it — researching {normalized.account_name}. Is that right?",
-        )
+        if in_progress:
+            say(text=f"_Heads up: you have {in_progress} other thread(s) in progress. Scroll up to find them._")
+    except Exception:
+        pass
+
+    say(
+        blocks=confirmation_card(
+            account_name=normalized.account_name,
+            persona_filter=normalized.persona_filter,
+            use_case_angle=normalized.use_case_angle,
+            session_id=session_id,
+        ),
+        text=f"Got it. Here's what I'll run for {normalized.account_name}.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +175,20 @@ def handle_confirm_intent(ack, body, say, client):
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
     channel_id = body["channel"]["id"]
+
+    # Disable the confirmation card immediately so the rep can't double-click
+    try:
+        client.chat_update(
+            channel=channel_id,
+            ts=thread_ts,
+            blocks=[{
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"_Running research on *{body.get('message', {}).get('text', 'account')}*..._"},
+            }],
+            text="Research started.",
+        )
+    except Exception:
+        pass
 
     log_event(session_id, "intent_confirmed", 1, user_id, {})
 
@@ -199,7 +206,9 @@ def handle_confirm_intent(ack, body, say, client):
 
         account_name = session.account_name
 
-        # Post initial progress message — updated in place as each step completes
+        # ---------------------------------------------------------------
+        # Phase 2 — Company research with live progress
+        # ---------------------------------------------------------------
         progress_resp = say(
             blocks=research_progress_blocks(account_name, ["⏳ Starting company research..."]),
             text=f"Researching {account_name}...",
@@ -226,14 +235,12 @@ def handle_confirm_intent(ack, body, say, client):
                 except Exception as e:
                     logger.warning(f"Progress update failed: {e}")
 
-        # Run company research with live progress
         research_data = researcher.research(
             account_name=account_name,
             account_domain=session.account_domain or None,
             progress_callback=update_progress,
         )
 
-        # Persist CompanyResearch to DB
         cr_row = CompanyResearch(
             id=research_data["id"],
             session_id=session_id,
@@ -264,7 +271,7 @@ def handle_confirm_intent(ack, body, say, client):
             "gap_count": len(research_data.get("research_gaps", [])),
         })
 
-        # Replace progress message with full research brief
+        # Replace progress card with research brief (no button — contacts load automatically)
         brief_blocks = research_brief_card(research_data, session_id)
         if progress_ts:
             client.chat_update(
@@ -276,53 +283,45 @@ def handle_confirm_intent(ack, body, say, client):
         else:
             say(blocks=brief_blocks, text=f"Research brief for {account_name}", thread_ts=thread_ts)
 
-    except Exception as e:
-        logger.error(f"Phase 2 research failed for session {session_id}: {e}", exc_info=True)
-        say(text="Something went wrong during research. Please try again.", thread_ts=thread_ts)
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 — Contact Sourcing (triggered by "Find contacts" button)
-# ---------------------------------------------------------------------------
-
-@app.action("find_contacts")
-def handle_find_contacts(ack, body, say, client):
-    ack()
-    session_id = body["actions"][0]["value"]
-    user_id = body["user"]["id"]
-    channel_id = body["channel"]["id"]
-    # Container message ts is the research brief message; thread_ts is the thread root
-    thread_ts = body.get("container", {}).get("message_ts") or body["message"]["ts"]
-
-    try:
-        db = next(get_db())
-        session = db.query(Session).filter(Session.id == session_id).first()
-        if not session:
-            say(text="Session not found.", thread_ts=thread_ts)
-            return
-
-        work_thread = session.thread_ts or thread_ts
+        # ---------------------------------------------------------------
+        # Phase 3 — Contact sourcing + AE game plan (auto-advances)
+        # ---------------------------------------------------------------
         session.phase = 4
         session.phase_label = "contacts_sourcing"
         db.commit()
 
-        say(text="Pulling contacts from Apollo...", thread_ts=work_thread)
+        # Post a status placeholder — will be replaced with the AE game plan card
+        status_resp = say(
+            text=f"Sourcing contacts and building AE game plan for {account_name}...",
+            thread_ts=thread_ts,
+        )
+        status_ts = status_resp.get("ts") if status_resp else None
 
         normalized = session.normalized_request or {}
         contacts = discovery.discover(
             session_id=session_id,
-            account_name=session.account_name,
+            account_name=account_name,
+            account_domain=session.account_domain or None,
             persona_filter=normalized.get("persona_filter"),
         )
 
         if not contacts:
-            say(
-                text=(
-                    f"I couldn't find any contacts at *{session.account_name}* in Apollo. "
-                    "Check the account name or try a different company."
-                ),
-                thread_ts=work_thread,
-            )
+            no_contacts_blocks = [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"I couldn't find any contacts at *{account_name}* in Apollo. Check the account name or try again.",
+                },
+            }]
+            if status_ts:
+                client.chat_update(
+                    channel=channel_id,
+                    ts=status_ts,
+                    blocks=no_contacts_blocks,
+                    text="No contacts found.",
+                )
+            else:
+                say(blocks=no_contacts_blocks, text="No contacts found.", thread_ts=thread_ts)
             log_event(session_id, "discovery_empty", 3, user_id, {})
             return
 
@@ -352,15 +351,51 @@ def handle_find_contacts(ack, body, say, client):
 
         log_event(session_id, "contacts_sourced", 3, user_id, {"contact_count": len(contacts)})
 
+        # Generate AE game plan — update the status placeholder with the result
+        sales_play = sales_play_agent.generate(
+            research_data=research_data,
+            contacts=contacts,
+            account_name=account_name,
+        )
+        play_blocks = sales_play_card(sales_play, account_name)
+        if status_ts:
+            try:
+                client.chat_update(
+                    channel=channel_id,
+                    ts=status_ts,
+                    blocks=play_blocks,
+                    text=f"AE game plan for {account_name}",
+                )
+            except Exception as e:
+                logger.warning(f"[sales_play] Failed to update status message: {e}")
+                say(blocks=play_blocks, text=f"AE game plan for {account_name}", thread_ts=thread_ts)
+        else:
+            say(blocks=play_blocks, text=f"AE game plan for {account_name}", thread_ts=thread_ts)
+
+        # Post contact list as a separate message after the game plan
+        contact_blocks = contact_list_card(contacts, session_id, flagged_ids=set())
         say(
-            blocks=contact_list_card(contacts, session_id, flagged_ids=set()),
-            text=f"Found {len(contacts)} contacts at {session.account_name}.",
-            thread_ts=work_thread,
+            blocks=contact_blocks,
+            text=f"Found {len(contacts)} contacts at {account_name}.",
+            thread_ts=thread_ts,
         )
 
     except Exception as e:
-        logger.error(f"handle_find_contacts failed for session {session_id}: {e}", exc_info=True)
-        say(text="Something went wrong pulling contacts. Please try again.", thread_ts=thread_ts)
+        logger.error(f"Phase 2-3 failed for session {session_id}: {e}", exc_info=True)
+        say(text="Something went wrong during research. Please try again.", thread_ts=thread_ts)
+
+
+# ---------------------------------------------------------------------------
+# find_contacts — kept for backward compat with sessions started before v2
+# ---------------------------------------------------------------------------
+
+@app.action("find_contacts")
+def handle_find_contacts(ack, body, say):
+    ack()
+    say(
+        text="Contact sourcing now runs automatically. If this session is stuck, cancel and start a new one.",
+        thread_ts=body["message"]["ts"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +567,8 @@ def handle_approve_contacts(ack, body, say, client):
                 "board_initiatives": cr_db.board_initiatives or [],
                 "trigger_events": cr_db.trigger_events or [],
                 "exception_tax": cr_db.exception_tax,
+                "company_priorities": cr_db.company_priorities or [],
+                "raw_research_text": cr_db.raw_research_text or "",
             }
 
         # ------------------------------------------------------------------
@@ -572,12 +609,45 @@ def handle_approve_contacts(ack, body, say, client):
         db.commit()
 
         # ------------------------------------------------------------------
-        # Sequence generation
+        # Theme routing — select content theme based on account research signals
         # ------------------------------------------------------------------
-        say(text="Generating sequences...", thread_ts=work_thread)
+        routing_result = theme_router.route(
+            research_data=company_research or {},
+            approved_personas=scored_personas,
+        )
+        normalized["theme_routing"] = {
+            "primary_theme_id": routing_result["primary_theme_id"],
+            "selection_rationale": routing_result["selection_rationale"],
+            "method": routing_result["method"],
+        }
+        session.normalized_request = normalized
+        flag_modified(session, "normalized_request")
+        db.commit()
+
+        log_event(session_id, "theme_selected", 5, user_id, {
+            "primary_theme": routing_result["primary_theme_id"],
+            "method": routing_result["method"],
+        })
+
+        theme_assignments = {
+            a["persona_id"]: a
+            for a in routing_result.get("persona_assignments", [])
+        }
+
+        # ------------------------------------------------------------------
+        # Sequence generation — only for flagged contacts; fall back to all if none flagged
+        # ------------------------------------------------------------------
+        flagged_persona_ids = {p.id for p in all_personas if p.deep_research_flagged}
+        sequence_targets = (
+            [sp for sp in scored_personas if sp["id"] in flagged_persona_ids]
+            if flagged_persona_ids
+            else scored_personas
+        )
+
+        say(text=f"Generating sequences for {len(sequence_targets)} contact(s)...", thread_ts=work_thread)
 
         sequences = []
-        for sp in scored_personas:
+        for sp in sequence_targets:
             cr = contact_research_map.get(sp["id"])
             seq = generator.generate(
                 persona=sp,
@@ -587,6 +657,7 @@ def handle_approve_contacts(ack, body, say, client):
                 session_id=session_id,
                 company_research=company_research,
                 contact_research=cr,
+                theme_assignment=theme_assignments.get(sp["id"]),
             )
             sequences.append(seq)
 
@@ -595,7 +666,6 @@ def handle_approve_contacts(ack, body, say, client):
                 session_id=session_id,
                 persona_id=sp["id"],
                 lane=seq["lane"],
-                personalization_tier=seq.get("personalization_tier", "standard"),
                 status="rep_review",
                 steps=seq["steps"],
                 edit_history=[],
@@ -610,7 +680,7 @@ def handle_approve_contacts(ack, body, say, client):
 
         # Post each sequence for review
         for seq in sequences:
-            match = next((p for p in scored_personas if p["id"] == seq["persona_id"]), {})
+            match = next((p for p in sequence_targets if p["id"] == seq["persona_id"]), {})
             name = f"{match.get('first_name', '')} {match.get('last_name', '')}".strip()
             lane = seq["lane"]
             tier_badge = " ⭐" if seq.get("personalization_tier") == "deep" else ""
@@ -624,19 +694,27 @@ def handle_approve_contacts(ack, body, say, client):
             }]
             for step in seq["steps"]:
                 all_blocks.extend(sequence_step_card(step, name, seq["id"]))
-            all_blocks.append({
-                "type": "actions",
-                "block_id": f"approve_sequence_{seq['id']}",
-                "elements": [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Approve All & Deliver Brief"},
-                    "style": "primary",
-                    "action_id": "approve_sequence",
-                    "value": seq["id"],
-                }],
-            })
 
             say(blocks=all_blocks, text=f"Sequence for {name}", thread_ts=work_thread)
+
+        # Single collective approval card after all sequences are posted
+        persona_names = [
+            f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+            for p in sequence_targets
+        ]
+        primary_theme = CONTENT_THEMES.get(routing_result["primary_theme_id"], {})
+        say(
+            blocks=all_sequences_approval_card(
+                session_id,
+                persona_names,
+                theme_info={
+                    "name": primary_theme.get("display_name", ""),
+                    "rationale": routing_result["selection_rationale"],
+                },
+            ),
+            text="Review sequences above, then approve all when ready.",
+            thread_ts=work_thread,
+        )
 
     except Exception as e:
         logger.error(f"approve_contacts failed for session {session_id}: {e}", exc_info=True)
@@ -847,6 +925,92 @@ def handle_approve_sequence(ack, body, say):
 
 
 # ---------------------------------------------------------------------------
+# Collective sequence approval → brief delivery + session complete
+# ---------------------------------------------------------------------------
+
+@app.action("approve_all_sequences")
+def handle_approve_all_sequences(ack, body, say):
+    ack()
+    session_id = body["actions"][0]["value"]
+    user_id = body["user"]["id"]
+    thread_ts = body["message"]["ts"]
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if not session:
+            say(text="Session not found.", thread_ts=thread_ts)
+            return
+
+        work_thread = session.thread_ts or thread_ts
+        sequences = db.query(Sequence).filter(Sequence.session_id == session_id).all()
+
+        persona_names = []
+        for seq in sequences:
+            seq.status = "approved"
+            persona = db.query(Persona).filter(Persona.id == seq.persona_id).first()
+            if persona:
+                persona_dict = {
+                    "first_name": persona.first_name,
+                    "last_name": persona.last_name,
+                    "title": persona.title,
+                    "account_name": persona.account_name,
+                }
+                say(
+                    blocks=sequence_brief_card({"lane": seq.lane, "steps": seq.steps or []}, persona_dict),
+                    text=f"Brief for {persona.first_name} {persona.last_name} — ready to paste.",
+                    thread_ts=work_thread,
+                )
+                persona_names.append(f"{persona.first_name} {persona.last_name}".strip())
+                log_event(session_id, "sequence_approved", 6, user_id, {"sequence_id": seq.id})
+
+        session.phase = 7
+        session.phase_label = "completed"
+        session.status = "completed"
+        db.commit()
+
+        say(
+            blocks=session_complete_card(session.account_name, len(sequences), persona_names),
+            text=f"Done — {len(sequences)} sequence(s) ready for {session.account_name}.",
+            thread_ts=work_thread,
+        )
+
+    except Exception as e:
+        logger.error(f"handle_approve_all_sequences failed for {session_id}: {e}", exc_info=True)
+        say(text="Something went wrong delivering briefs.", thread_ts=thread_ts)
+
+
+# ---------------------------------------------------------------------------
+# Clear thread — type "clear" in any thread to delete all bot messages in it
+# ---------------------------------------------------------------------------
+
+@app.message(re.compile(r"^\s*clear\s*$", re.IGNORECASE))
+def handle_clear(message, client, say):
+    channel_id = message.get("channel")
+    thread_ts = message.get("thread_ts")
+    user_message_ts = message.get("ts")
+
+    if not thread_ts:
+        say(
+            text="_Type `clear` inside a research thread to delete all bot messages in it._",
+            thread_ts=user_message_ts,
+        )
+        return
+
+    try:
+        result = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
+        messages = result.get("messages", [])
+        for msg in messages:
+            if msg.get("bot_id"):
+                try:
+                    client.chat_delete(channel=channel_id, ts=msg["ts"])
+                except Exception as e:
+                    logger.warning(f"[clear] Could not delete message {msg.get('ts')}: {e}")
+    except Exception as e:
+        logger.error(f"[clear] Failed to fetch thread: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
 
@@ -937,7 +1101,7 @@ def handle_cancel_session(ack, body, say):
         if session:
             session.status = "cancelled"
             db.commit()
-        say(text="Session cancelled. Send me a new account name to start fresh.")
+        say(text="Thread cancelled. Start a new account anytime by sending a message.")
     except Exception as e:
         logger.error(f"handle_cancel_session failed: {e}", exc_info=True)
 
@@ -947,12 +1111,85 @@ def handle_cancel_session(ack, body, say):
 # ---------------------------------------------------------------------------
 
 @app.action("edit_intent")
-def handle_edit_intent(ack, body, say):
+def handle_edit_intent(ack, body, client):
     ack()
-    say(
-        text="No problem — which account did you want to target?",
-        thread_ts=body["message"]["ts"],
-    )
+    session_id = body["actions"][0]["value"]
+    channel_id = body["channel"]["id"]
+    message_ts = body["message"]["ts"]
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if not session:
+            return
+        normalized = session.normalized_request or {}
+        client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=edit_confirmation_card(
+                account_name=normalized.get("account_name", ""),
+                persona_filter=normalized.get("persona_filter"),
+                use_case_angle=normalized.get("use_case_angle"),
+                session_id=session_id,
+            ),
+            text="Edit your request:",
+        )
+    except Exception as e:
+        logger.error(f"handle_edit_intent failed: {e}", exc_info=True)
+
+
+@app.action("submit_edit")
+def handle_submit_edit(ack, body, client):
+    ack()
+    session_id = body["actions"][0]["value"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    message_ts = body["message"]["ts"]
+    state = body.get("state", {}).get("values", {})
+
+    account_name = ""
+    persona_filter = None
+    use_case_angle = None
+
+    for block_id, block_values in state.items():
+        if block_id.startswith("edit_account_"):
+            account_name = (block_values.get("edit_account_input", {}).get("value") or "").strip()
+        elif block_id.startswith("edit_personas_"):
+            raw = (block_values.get("edit_personas_input", {}).get("value") or "").strip()
+            persona_filter = [p.strip() for p in raw.split(",") if p.strip()] or None
+        elif block_id.startswith("edit_angle_"):
+            val = (block_values.get("edit_angle_input", {}).get("value") or "").strip()
+            use_case_angle = val or None
+
+    try:
+        db = next(get_db())
+        session = db.query(Session).filter(Session.id == session_id).first()
+        if not session:
+            return
+
+        normalized = dict(session.normalized_request or {})
+        normalized["account_name"] = account_name
+        normalized["persona_filter"] = persona_filter
+        normalized["use_case_angle"] = use_case_angle
+        session.account_name = account_name
+        session.normalized_request = normalized
+        flag_modified(session, "normalized_request")
+        db.commit()
+
+        log_event(session_id, "intent_edited", 1, user_id, {
+            "account_name": account_name,
+            "persona_filter": persona_filter,
+            "use_case_angle": use_case_angle,
+        })
+
+        client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=confirmation_card(account_name, persona_filter, use_case_angle, session_id),
+            text=f"Got it. Here's what I'll run for {account_name}.",
+        )
+    except Exception as e:
+        logger.error(f"handle_submit_edit failed: {e}", exc_info=True)
 
 
 @app.action("submit_clarification")

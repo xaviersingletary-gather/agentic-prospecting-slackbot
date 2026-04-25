@@ -63,6 +63,8 @@ def calculate_exception_tax(total_sqft: int, sqft_source: str) -> dict:
 
 _SYNTHESIS_PROMPT = """You are a B2B sales research analyst preparing an account brief for Gather AI, a warehouse drone inventory automation company.
 
+Gather AI sells to warehouse operators with 10+ DCs. Key buying signals: hiring automation/CI/inventory roles, new DCs opening, WMS migrations, shrink/accuracy programs, executive ops mandates.
+
 Extract structured intelligence from the research text below about {company_name}.
 
 Return ONLY valid JSON — no explanation, no markdown code fences:
@@ -87,10 +89,13 @@ Return ONLY valid JSON — no explanation, no markdown code fences:
 
 RULES:
 - board_initiatives: max 3. Include ONLY if sourced from the research text. No guesses.
-- company_priorities: max 2. Infer from research context.
-- trigger_events: max 2. Must be specific and recent (within 18 months preferred).
+- company_priorities: max 3. Infer from research context — include supply chain/ops priorities.
+- trigger_events: max 5. Include ALL of:
+    (a) news events: facility expansions, M&A, leadership changes, audits, shrink incidents
+    (b) hiring signals: if the company is actively hiring automation engineers, CI managers, inventory control directors, or similar roles, include each as a trigger event with description="Actively hiring [role title]"
+  Must be specific and recent (within 18 months preferred).
 - total_sqft_estimate: estimate total sq ft across all facilities. Use facility_count × typical industry sq ft per facility if direct data unavailable.
-- research_gaps: explicitly list what was NOT found (e.g. "No board-level initiatives found with clear sources", "Facility count not found").
+- research_gaps: explicitly list what was NOT found (e.g. "Facility count not confirmed", "No WMS vendor identified").
 - Do NOT hallucinate. If data is absent, add it to research_gaps.
 
 RESEARCH TEXT:
@@ -130,20 +135,20 @@ class CompanyResearchAgent:
         doc_text = ""
 
         # ------------------------------------------------------------------
-        # Step 1: EDGAR 10-K lookup
+        # Step 1: EDGAR annual filing lookup (10-K for US, 20-F for foreign)
         # ------------------------------------------------------------------
-        progress(f"⏳ Looking up public filings for *{account_name}*...")
+        progress(f"⏳ Looking up public SEC filings for *{account_name}*...")
         edgar_result = None
         try:
             edgar_result = self.edgar.find_latest_10k(account_name)
             if edgar_result and edgar_result.get("document_url"):
                 period = edgar_result.get("period", "recent")
-                progress(f"✓ Found {period} 10-K — fetching key sections...")
+                form_type = edgar_result.get("form_type", "10-K")
+                progress(f"✓ Found {period} {form_type} — fetching key sections...")
                 content = self.exa.fetch_url_content(
                     edgar_result["document_url"], max_chars=18_000
                 )
                 if not content:
-                    # Fallback: direct HTTP fetch
                     html = fetch_html(edgar_result["document_url"])
                     if html:
                         sections = extract_10k_sections(html)
@@ -154,50 +159,88 @@ class CompanyResearchAgent:
 
                 if content:
                     doc_text = (
-                        f"=== 10-K ANNUAL REPORT ({period}) ===\n"
+                        f"=== {form_type} ANNUAL REPORT ({period}) ===\n"
                         f"Source: {edgar_result['document_url']}\n\n"
                         f"{content[:15_000]}"
                     )
                     documents_used.append({
-                        "doc_type": "10-K",
+                        "doc_type": form_type,
                         "source_url": edgar_result["document_url"],
                         "filing_period": period,
+                        "entity_name": edgar_result.get("entity_name", account_name),
                     })
-                    progress(f"✓ 10-K sections extracted")
+                    progress(f"✓ {form_type} sections extracted")
                 else:
-                    progress(f"⚠️ 10-K found but content unavailable — continuing with web sources")
+                    progress(f"⚠️ {form_type} found but content unavailable — using web sources")
             else:
-                progress(f"ℹ️ No public 10-K found — using web research only")
+                progress(f"ℹ️ No SEC filing found — likely non-US filer; using web research")
         except Exception as e:
             logger.warning(f"[researcher] EDGAR step failed: {e}")
             progress(f"ℹ️ Public filing lookup unavailable — using web research only")
 
         # ------------------------------------------------------------------
         # Step 2: Exa topic searches
+        # Fetch full content for the three highest-value topics.
+        # Run alt query variants for earnings and facilities to widen coverage.
+        # Domain-target where we have it (company IR / investor relations site).
         # ------------------------------------------------------------------
-        progress(f"⏳ Searching for board initiatives and earnings data...")
-        earnings_hits = self.exa.search_topic(account_name, "earnings_board")
+        ir_domain = account_domain if account_domain else None
 
-        progress(f"⏳ Searching for press releases and news...")
-        press_hits = self.exa.search_topic(account_name, "press_releases")
+        progress(f"⏳ Searching earnings calls, investor day, and strategic priorities...")
+        earnings_hits = self.exa.search_topic(
+            account_name, "earnings_board",
+            fetch_top_content=True, also_run_alt=True,
+            include_domain=ir_domain,
+        )
 
-        progress(f"⏳ Searching for distribution network and facility data...")
-        facility_hits = self.exa.search_topic(account_name, "facilities")
+        progress(f"⏳ Searching press releases and expansion announcements...")
+        press_hits = self.exa.search_topic(account_name, "press_releases", num_results=6)
 
-        progress(f"⏳ Searching for automation and WMS vendors...")
-        automation_hits = self.exa.search_topic(account_name, "automation")
+        progress(f"⏳ Searching distribution network and facility footprint...")
+        facility_hits = self.exa.search_topic(
+            account_name, "facilities",
+            fetch_top_content=True, also_run_alt=True,
+        )
 
-        progress(f"⏳ Checking for trigger events...")
-        trigger_hits = self.exa.search_topic(account_name, "triggers")
+        progress(f"⏳ Searching WMS, automation vendors, and tech stack...")
+        automation_hits = self.exa.search_topic(account_name, "automation", num_results=6)
+
+        progress(f"⏳ Searching for trigger events and buying signals...")
+        trigger_hits = self.exa.search_topic(
+            account_name, "triggers",
+            fetch_top_content=True,
+        )
+
+        progress(f"⏳ Searching for hiring signals (automation, CI, inventory roles)...")
+        hiring_hits = self.exa.search_topic(account_name, "hiring", num_results=6)
 
         # ------------------------------------------------------------------
-        # Step 3: Compile research text
+        # Step 3: Compile research text + track Exa sources
         # ------------------------------------------------------------------
         research_text = self._compile_research(
             account_name, doc_text,
             earnings_hits, press_hits, facility_hits,
-            automation_hits, trigger_hits,
+            automation_hits, trigger_hits, hiring_hits,
         )
+
+        # Collect top Exa URLs as source references (one per topic, URL only)
+        exa_topic_map = [
+            ("Earnings / Board Initiatives", earnings_hits),
+            ("Press Releases / News", press_hits),
+            ("Facilities / Distribution", facility_hits),
+            ("Automation / WMS", automation_hits),
+            ("Trigger Events", trigger_hits),
+            ("Hiring Signals", hiring_hits),
+        ]
+        for topic_label, hits in exa_topic_map:
+            for h in (hits or [])[:1]:
+                url = h.get("url", "")
+                if url:
+                    documents_used.append({
+                        "doc_type": f"Web: {topic_label}",
+                        "source_url": url,
+                        "filing_period": (h.get("date", "") or "")[:10],
+                    })
 
         # ------------------------------------------------------------------
         # Step 4: LLM synthesis
@@ -235,7 +278,7 @@ class CompanyResearchAgent:
             "exception_tax": exception_tax,
             "research_gaps": synthesis.get("research_gaps", []),
             "documents_used": documents_used,
-            "raw_research_text": research_text[:8_000],  # truncated for DB storage
+            "raw_research_text": research_text[:15_000],
         }
 
     # ------------------------------------------------------------------
@@ -251,18 +294,21 @@ class CompanyResearchAgent:
         facility_hits: list,
         automation_hits: list,
         trigger_hits: list,
+        hiring_hits: list = None,
     ) -> str:
         sections = [f"TARGET COMPANY: {company}\n"]
 
         if doc_text:
             sections.append(doc_text)
 
+        # Priority order: highest-value topics first so truncation hits low-value sections last
         topic_map = [
             ("EARNINGS / BOARD INITIATIVES", earnings_hits),
-            ("PRESS RELEASES / NEWS", press_hits),
             ("FACILITIES / DISTRIBUTION NETWORK", facility_hits),
-            ("AUTOMATION / WMS VENDORS", automation_hits),
             ("TRIGGER EVENTS", trigger_hits),
+            ("HIRING SIGNALS (automation, CI, inventory roles)", hiring_hits or []),
+            ("AUTOMATION / WMS VENDORS", automation_hits),
+            ("PRESS RELEASES / NEWS", press_hits),
         ]
 
         for section_label, hits in topic_map:
@@ -279,6 +325,9 @@ class CompanyResearchAgent:
                     parts.append(f"Headline: {h['headline']}")
                 if h.get("snippet"):
                     parts.append(f"Excerpt: {h['snippet']}")
+                # Include full article content when available (top result only)
+                if h.get("full_content"):
+                    parts.append(f"Full article:\n{h['full_content'][:4_000]}")
                 parts.append("")
             sections.append("\n".join(parts))
 
@@ -292,7 +341,7 @@ class CompanyResearchAgent:
 
         prompt = _SYNTHESIS_PROMPT.format(
             company_name=company_name,
-            research_text=research_text[:12_000],  # stay within context window
+            research_text=research_text[:20_000],
         )
 
         try:

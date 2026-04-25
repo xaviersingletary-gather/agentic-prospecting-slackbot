@@ -1,6 +1,10 @@
 """
-SEC EDGAR integration — finds a company's latest 10-K filing and returns the document URL.
-Uses the EDGAR EFTS full-text search API (no API key required).
+SEC EDGAR integration — finds a company's latest 10-K or 20-F filing.
+Uses the EDGAR EFTS entity-search API (no API key required).
+
+Note: Foreign companies (e.g. Lenovo on HKEX, Nestle on SIX) do not file
+10-K or 20-F with the SEC, so this will return None for them. The researcher
+falls back to Exa web research in that case.
 """
 import logging
 from typing import Optional
@@ -19,23 +23,33 @@ _HEADERS = {
 
 
 class EdgarClient:
-    """Lightweight EDGAR client for locating 10-K filings."""
+    """Lightweight EDGAR client for locating annual SEC filings."""
 
     def find_latest_10k(self, company_name: str) -> Optional[dict]:
         """
-        Search EDGAR for a company's latest 10-K filing.
-        Returns dict with keys: entity_name, file_date, period, cik, accession_no, document_url
-        Returns None if not found or on error.
+        Search EDGAR for the company's latest annual filing.
+        Tries 10-K first (US domestic), then 20-F (foreign private issuers).
+        Returns dict with keys: entity_name, file_date, period, cik, accession_no,
+        document_url, form_type. Returns None if no SEC filing exists.
         """
-        hit = self._efts_search(company_name)
+        # Try 10-K (US companies)
+        hit, form_type = self._efts_search(company_name, "10-K")
+
+        # Try 20-F (foreign private issuers like Nestle, Samsung, etc.)
         if not hit:
+            hit, form_type = self._efts_search(company_name, "20-F")
+
+        if not hit:
+            logger.info(
+                f"[edgar] '{company_name}' has no 10-K or 20-F — likely non-SEC filer "
+                "(e.g. foreign company listed on HKEX, SIX, etc.)"
+            )
             return None
 
         accession_no = hit.get("accession_no", "")
         if not accession_no:
             return None
 
-        # CIK is the numeric prefix of the accession number (e.g. "0000354950-24-000012" → 354950)
         try:
             cik = int(accession_no.split("-")[0])
         except (ValueError, IndexError):
@@ -51,34 +65,55 @@ class EdgarClient:
             "cik": cik,
             "accession_no": accession_no,
             "document_url": document_url,
+            "form_type": form_type,
         }
 
-    def _efts_search(self, company_name: str) -> Optional[dict]:
-        """Search EFTS for the most recent 10-K matching the company name."""
-        try:
-            resp = httpx.get(
-                _EFTS_URL,
-                params={
-                    "q": f'"{company_name}"',
-                    "forms": "10-K",
-                    "dateRange": "custom",
-                    "startdt": "2022-01-01",
-                    "enddt": "2026-12-31",
-                },
-                headers=_HEADERS,
-                timeout=10,
-            )
-            resp.raise_for_status()
-            hits = resp.json().get("hits", {}).get("hits", [])
-            if not hits:
-                logger.info(f"[edgar] No 10-K found for '{company_name}'")
-                return None
-            # Sort by file_date descending — take the most recent
-            hits.sort(key=lambda h: h.get("_source", {}).get("file_date", ""), reverse=True)
-            return hits[0].get("_source", {})
-        except Exception as e:
-            logger.warning(f"[edgar] EFTS search failed for '{company_name}': {e}")
-            return None
+    def _efts_search(self, company_name: str, form: str) -> tuple[Optional[dict], str]:
+        """
+        Search EFTS for the most recent filing of the given form type.
+        Uses the `entity` param to match filer name (not full-text mentions),
+        with a fallback to `q` text search for tickers / short names like "GM".
+        Returns (hit_source_dict, form_type) or (None, form_type).
+        """
+        for search_params in [
+            # Pass 1: entity-name match (filer IS the company)
+            {"entity": company_name, "forms": form,
+             "dateRange": "custom", "startdt": "2021-01-01", "enddt": "2026-12-31"},
+            # Pass 2: full-text match (catches ticker symbols like "GM" that appear in filing text)
+            {"q": f'"{company_name}"', "forms": form,
+             "dateRange": "custom", "startdt": "2021-01-01", "enddt": "2026-12-31"},
+        ]:
+            try:
+                resp = httpx.get(_EFTS_URL, params=search_params, headers=_HEADERS, timeout=10)
+                resp.raise_for_status()
+                hits = resp.json().get("hits", {}).get("hits", [])
+                if not hits:
+                    continue
+
+                # Sort newest first
+                hits.sort(
+                    key=lambda h: h.get("_source", {}).get("file_date", ""), reverse=True
+                )
+
+                # For the text-search pass, verify the top hit's entity is actually our company
+                # (text search can return other companies' filings that merely mention our target)
+                source = hits[0].get("_source", {})
+                entity = (source.get("entity_name") or "").upper()
+                name_up = company_name.upper()
+                if "entity" not in search_params:
+                    # Full-text pass: skip if top hit entity looks unrelated
+                    if name_up not in entity and entity not in name_up:
+                        logger.info(
+                            f"[edgar] Full-text hit entity '{entity}' doesn't match '{company_name}' — skipping"
+                        )
+                        continue
+
+                logger.info(f"[edgar] Found {form} for '{company_name}': entity='{entity}'")
+                return source, form
+            except Exception as e:
+                logger.warning(f"[edgar] EFTS search ({form}) failed for '{company_name}': {e}")
+
+        return None, form
 
     def _get_primary_document_url(self, cik: int, accession_no: str) -> Optional[str]:
         """
