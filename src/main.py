@@ -179,15 +179,21 @@ def handle_message(message, say, client):
     except Exception:
         pass
 
-    say(
-        blocks=confirmation_card(
+    logger.info(f"[handle_message] posting confirmation card for session {session_id}")
+    try:
+        blocks = confirmation_card(
             account_name=normalized.account_name,
             persona_filter=normalized.persona_filter,
             use_case_angle=normalized.use_case_angle,
             session_id=session_id,
-        ),
-        text=f"Got it. Here's what I'll run for {normalized.account_name}.",
-    )
+        )
+        resp = say(
+            blocks=blocks,
+            text=f"Got it. Here's what I'll run for {normalized.account_name}.",
+        )
+        logger.info(f"[handle_message] say() returned: ok={resp.get('ok')} ts={resp.get('ts')}")
+    except Exception as _say_err:
+        logger.error(f"[handle_message] say() failed: {_say_err}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
