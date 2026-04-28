@@ -1278,9 +1278,8 @@ if __name__ == "__main__":
             print("WARNING: init_db() timed out after 15s — DB may not be fully initialized", flush=True)
             logger.warning("init_db() timed out — continuing without full DB initialization")
         elif _db_error:
-            print(f"FATAL: Database init failed: {_db_error[0]}", flush=True)
-            logger.error(f"Database init FAILED: {_db_error[0]}", exc_info=True)
-            _sys.exit(1)
+            print(f"WARNING: Database init error (non-fatal): {_db_error[0]}", flush=True)
+            logger.warning(f"init_db() failed (non-fatal): {_db_error[0]}")
         else:
             print("STARTUP: init_db() OK", flush=True)
             logger.info("Database initialized")

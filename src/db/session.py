@@ -28,20 +28,23 @@ _COLUMN_MIGRATIONS = [
 def init_db():
     if not engine:
         raise RuntimeError("DATABASE_URL is not set")
-    # Use a single connection with timeouts so DDL never hangs waiting for locks
-    # (e.g. when old container is still running during a rolling deploy)
+    # Use lock_timeout='1ms' so DDL never waits for locks held by another container.
+    # If create_all() can't acquire locks immediately, it raises LockNotAvailable
+    # which is caught and ignored (tables already exist from previous deploys).
     with engine.connect() as conn:
-        conn.execute(text("SET lock_timeout = '8s'"))
-        conn.execute(text("SET statement_timeout = '15s'"))
-        # create_all accepts a Connection in SQLAlchemy 2.x
-        Base.metadata.create_all(bind=conn)
+        conn.execute(text("SET lock_timeout = '1ms'"))
+        conn.execute(text("SET statement_timeout = '10s'"))
+        try:
+            Base.metadata.create_all(bind=conn)
+        except Exception:
+            pass  # tables likely already exist; lock contention is expected on rolling deploys
         # Apply additive column migrations — idempotent
         for sql in _COLUMN_MIGRATIONS:
             try:
                 conn.execute(text(sql))
                 conn.commit()
             except Exception:
-                pass  # column already exists or table doesn't exist yet
+                pass  # column already exists or lock contention — safe to ignore
 
 
 def get_db():
