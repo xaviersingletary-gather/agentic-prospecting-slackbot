@@ -5,44 +5,57 @@ import sys
 import uuid
 from datetime import datetime
 
+print("STARTUP: main.py loading...", flush=True)
+
 # Ensure project root is in sys.path so 'src' is importable regardless of how
 # Railway (or any other host) invokes this file.
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-import sentry_sdk
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+print("STARTUP: sys.path configured", flush=True)
 
-from src.config import settings
-from src.agents.normalizer import InputNormalizerAgent, RepRequest
-from src.agents.discovery import PersonaDiscoveryAgent
-from src.agents.scorer import ScorerAgent
-from src.agents.generator import SequenceGeneratorAgent
-from src.agents.editor import SequenceEditorAgent
-from src.agents.researcher import CompanyResearchAgent
-from src.agents.contact_researcher import ContactResearchAgent
-from src.agents.sales_play import SalesPlayAgent
-from src.agents.theme_router import ThemeRouterAgent, THEMES as CONTENT_THEMES
-from src.integrations.google_drive import GoogleDriveClient
-from src.db.session import init_db, get_db
-from src.db.models import Session, WorkflowEvent, Persona, Sequence, CompanyResearch, ContactResearch
-from sqlalchemy.orm.attributes import flag_modified
-from src.integrations.slack_blocks import (
-    confirmation_card,
-    edit_confirmation_card,
-    research_progress_blocks,
-    research_brief_card,
-    sales_play_card,
-    contact_list_card,
-    resume_session_card,
-    sequence_step_card,
-    sequence_brief_card,
-    all_sequences_approval_card,
-    session_complete_card,
-    edit_step_modal,
-)
+try:
+    import sentry_sdk
+    from slack_bolt import App
+except Exception as _import_err:
+    print(f"FATAL IMPORT ERROR: {_import_err}", flush=True)
+    sys.exit(1)
+try:
+    from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+    from src.config import settings
+    from src.agents.normalizer import InputNormalizerAgent, RepRequest
+    from src.agents.discovery import PersonaDiscoveryAgent
+    from src.agents.scorer import ScorerAgent
+    from src.agents.generator import SequenceGeneratorAgent
+    from src.agents.editor import SequenceEditorAgent
+    from src.agents.researcher import CompanyResearchAgent
+    from src.agents.contact_researcher import ContactResearchAgent
+    from src.agents.sales_play import SalesPlayAgent
+    from src.agents.theme_router import ThemeRouterAgent, THEMES as CONTENT_THEMES
+    from src.integrations.google_drive import GoogleDriveClient
+    from src.db.session import init_db, get_db
+    from src.db.models import Session, WorkflowEvent, Persona, Sequence, CompanyResearch, ContactResearch
+    from sqlalchemy.orm.attributes import flag_modified
+    from src.integrations.slack_blocks import (
+        confirmation_card,
+        edit_confirmation_card,
+        research_progress_blocks,
+        research_brief_card,
+        sales_play_card,
+        contact_list_card,
+        resume_session_card,
+        sequence_step_card,
+        sequence_brief_card,
+        all_sequences_approval_card,
+        session_complete_card,
+        edit_step_modal,
+    )
+    print("STARTUP: all imports OK", flush=True)
+except Exception as _import_err:
+    print(f"FATAL IMPORT ERROR (src): {_import_err}", flush=True)
+    sys.exit(1)
 
 # Sentry — must be initialized before anything else
 if settings.SENTRY_DSN:
