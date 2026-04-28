@@ -1258,12 +1258,16 @@ def handle_persona_checkbox(ack, body):
 
 
 if __name__ == "__main__":
+    print("STARTUP: __main__ block entered", flush=True)
     import sys as _sys
     if settings.DATABASE_URL:
         try:
+            print("STARTUP: calling init_db()...", flush=True)
             init_db()
+            print("STARTUP: init_db() OK", flush=True)
             logger.info("Database initialized")
         except Exception as _e:
+            print(f"FATAL: Database init failed: {_e}", flush=True)
             logger.error(f"Database init FAILED: {_e}", exc_info=True)
             _sys.stderr.write(f"FATAL: Database init failed: {_e}\n")
             _sys.stderr.flush()
@@ -1271,6 +1275,7 @@ if __name__ == "__main__":
     else:
         logger.warning("DATABASE_URL not set — skipping DB initialization")
 
+    print("STARTUP: creating SocketModeHandler...", flush=True)
     logger.info(f"Starting Gather AI Prospecting Bot [{settings.ENVIRONMENT}]")
     try:
         handler = SocketModeHandler(app, settings.SLACK_APP_TOKEN)
