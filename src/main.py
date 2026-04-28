@@ -1260,18 +1260,30 @@ def handle_persona_checkbox(ack, body):
 if __name__ == "__main__":
     print("STARTUP: __main__ block entered", flush=True)
     import sys as _sys
+    import threading as _threading
     if settings.DATABASE_URL:
-        try:
-            print("STARTUP: calling init_db()...", flush=True)
-            init_db()
+        _db_error = []
+
+        def _run_init_db():
+            try:
+                init_db()
+            except Exception as _e:
+                _db_error.append(_e)
+
+        print("STARTUP: calling init_db() (15s timeout)...", flush=True)
+        _t = _threading.Thread(target=_run_init_db, daemon=True)
+        _t.start()
+        _t.join(timeout=15)
+        if _t.is_alive():
+            print("WARNING: init_db() timed out after 15s — DB may not be fully initialized", flush=True)
+            logger.warning("init_db() timed out — continuing without full DB initialization")
+        elif _db_error:
+            print(f"FATAL: Database init failed: {_db_error[0]}", flush=True)
+            logger.error(f"Database init FAILED: {_db_error[0]}", exc_info=True)
+            _sys.exit(1)
+        else:
             print("STARTUP: init_db() OK", flush=True)
             logger.info("Database initialized")
-        except Exception as _e:
-            print(f"FATAL: Database init failed: {_e}", flush=True)
-            logger.error(f"Database init FAILED: {_e}", exc_info=True)
-            _sys.stderr.write(f"FATAL: Database init failed: {_e}\n")
-            _sys.stderr.flush()
-            _sys.exit(1)
     else:
         logger.warning("DATABASE_URL not set — skipping DB initialization")
 
