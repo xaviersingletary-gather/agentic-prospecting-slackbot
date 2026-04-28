@@ -28,9 +28,14 @@ _COLUMN_MIGRATIONS = [
 def init_db():
     if not engine:
         raise RuntimeError("DATABASE_URL is not set")
-    Base.metadata.create_all(bind=engine)
-    # Apply additive column migrations — idempotent
+    # Use a single connection with timeouts so DDL never hangs waiting for locks
+    # (e.g. when old container is still running during a rolling deploy)
     with engine.connect() as conn:
+        conn.execute(text("SET lock_timeout = '8s'"))
+        conn.execute(text("SET statement_timeout = '15s'"))
+        # create_all accepts a Connection in SQLAlchemy 2.x
+        Base.metadata.create_all(bind=conn)
+        # Apply additive column migrations — idempotent
         for sql in _COLUMN_MIGRATIONS:
             try:
                 conn.execute(text(sql))
