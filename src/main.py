@@ -1232,12 +1232,25 @@ def handle_persona_checkbox(ack, body):
 
 
 if __name__ == "__main__":
+    import sys as _sys
     if settings.DATABASE_URL:
-        init_db()
-        logger.info("Database initialized")
+        try:
+            init_db()
+            logger.info("Database initialized")
+        except Exception as _e:
+            logger.error(f"Database init FAILED: {_e}", exc_info=True)
+            _sys.stderr.write(f"FATAL: Database init failed: {_e}\n")
+            _sys.stderr.flush()
+            _sys.exit(1)
     else:
         logger.warning("DATABASE_URL not set — skipping DB initialization")
 
     logger.info(f"Starting Gather AI Prospecting Bot [{settings.ENVIRONMENT}]")
-    handler = SocketModeHandler(app, settings.SLACK_APP_TOKEN)
-    handler.start()
+    try:
+        handler = SocketModeHandler(app, settings.SLACK_APP_TOKEN)
+        handler.start()
+    except Exception as _e:
+        logger.error(f"SocketModeHandler FAILED: {_e}", exc_info=True)
+        _sys.stderr.write(f"FATAL: Slack handler failed: {_e}\n")
+        _sys.stderr.flush()
+        _sys.exit(1)
