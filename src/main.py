@@ -35,7 +35,7 @@ try:
     from src.agents.sales_play import SalesPlayAgent
     from src.agents.theme_router import ThemeRouterAgent, THEMES as CONTENT_THEMES
     from src.integrations.google_drive import GoogleDriveClient
-    from src.db.session import init_db, get_db
+    from src.db.session import init_db, get_db, get_session, SessionLocal
     from src.db.models import Session, WorkflowEvent, Persona, Sequence, CompanyResearch, ContactResearch
     from sqlalchemy.orm.attributes import flag_modified
     from src.integrations.slack_blocks import (
@@ -102,18 +102,18 @@ def get_rep_role(user_id: str) -> str:
 
 def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload: dict):
     try:
-        db = next(get_db())
-        event = WorkflowEvent(
-            id=str(uuid.uuid4()),
-            session_id=session_id,
-            event_type=event_type,
-            phase=phase,
-            rep_id=rep_id,
-            payload=payload,
-            timestamp=datetime.utcnow(),
-        )
-        db.add(event)
-        db.commit()
+        with get_session() as db:
+            event = WorkflowEvent(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                event_type=event_type,
+                phase=phase,
+                rep_id=rep_id,
+                payload=payload,
+                timestamp=datetime.utcnow(),
+            )
+            db.add(event)
+            db.commit()
     except Exception as e:
         logger.error(f"Failed to log workflow event: {e}")
 
@@ -147,22 +147,22 @@ def handle_message(message, say, client):
 
     logger.info(f"[handle_message] persisting session {session_id}")
     try:
-        db = next(get_db())
-        session = Session(
-            id=session_id,
-            account_name=normalized.account_name,
-            account_domain=normalized.account_domain,
-            rep_id=user_id,
-            rep_role=rep_role,
-            channel_id=channel_id,
-            phase=1,
-            phase_label="confirmation",
-            status="active",
-            normalized_request=normalized.to_dict(),
-        )
-        db.add(session)
-        db.commit()
-        logger.info(f"[handle_message] session committed OK")
+        with get_session() as db:
+            session = Session(
+                id=session_id,
+                account_name=normalized.account_name,
+                account_domain=normalized.account_domain,
+                rep_id=user_id,
+                rep_role=rep_role,
+                channel_id=channel_id,
+                phase=1,
+                phase_label="confirmation",
+                status="active",
+                normalized_request=normalized.to_dict(),
+            )
+            db.add(session)
+            db.commit()
+            logger.info(f"[handle_message] session committed OK")
     except Exception as e:
         logger.error(f"Failed to persist session: {e}")
 
@@ -172,14 +172,14 @@ def handle_message(message, say, client):
 
     # Light warning if other threads are still in progress (non-blocking)
     try:
-        db = next(get_db())
-        in_progress = (
-            db.query(Session)
-            .filter(Session.rep_id == user_id, Session.status == "active", Session.id != session_id)
-            .count()
-        )
-        if in_progress:
-            say(text=f"_Heads up: you have {in_progress} other thread(s) in progress. Scroll up to find them._")
+        with get_session() as db:
+            in_progress = (
+                db.query(Session)
+                .filter(Session.rep_id == user_id, Session.status == "active", Session.id != session_id)
+                .count()
+            )
+            if in_progress:
+                say(text=f"_Heads up: you have {in_progress} other thread(s) in progress. Scroll up to find them._")
     except Exception:
         pass
 
@@ -228,8 +228,9 @@ def handle_confirm_intent(ack, body, say, client):
 
     log_event(session_id, "intent_confirmed", 1, user_id, {})
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             say(text="Session not found. Please start a new request.", thread_ts=thread_ts)
@@ -419,6 +420,9 @@ def handle_confirm_intent(ack, body, say, client):
     except Exception as e:
         logger.error(f"Phase 2-3 failed for session {session_id}: {e}", exc_info=True)
         say(text="Something went wrong during research. Please try again.", thread_ts=thread_ts)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -446,10 +450,10 @@ def handle_flag_contact(ack, body, client):
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]
 
+    db = None
     try:
         session_id, persona_id = value.split(":", 1)
-        db = next(get_db())
-
+        db = SessionLocal()
         persona = db.query(Persona).filter(Persona.id == persona_id).first()
         if not persona:
             return
@@ -504,6 +508,9 @@ def handle_flag_contact(ack, body, client):
 
     except Exception as e:
         logger.error(f"handle_flag_contact failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +524,9 @@ def handle_approve_contacts(ack, body, say, client):
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             say(text="Session not found.", thread_ts=thread_ts)
@@ -755,6 +763,9 @@ def handle_approve_contacts(ack, body, say, client):
     except Exception as e:
         logger.error(f"approve_contacts failed for session {session_id}: {e}", exc_info=True)
         say(text="Something went wrong. Please try again.", thread_ts=thread_ts)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -767,11 +778,12 @@ def handle_edit_step(ack, body, client):
     value = body["actions"][0]["value"]
     trigger_id = body["trigger_id"]
 
+    db = None
     try:
         sequence_id, step_number_str = value.split(":", 1)
         step_number = int(step_number_str)
 
-        db = next(get_db())
+        db = SessionLocal()
         seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
         if not seq:
             return
@@ -790,6 +802,9 @@ def handle_edit_step(ack, body, client):
 
     except Exception as e:
         logger.error(f"handle_edit_step failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 @app.view("edit_step_modal_submit")
@@ -799,6 +814,7 @@ def handle_edit_modal_submit(ack, body, client, say):
     metadata = body["view"]["private_metadata"]
     state = body["view"]["state"]["values"]
 
+    db = None
     try:
         parts = metadata.split(":", 2)
         sequence_id = parts[0]
@@ -814,7 +830,7 @@ def handle_edit_modal_submit(ack, body, client, say):
                 .get("value", "body")
             )
 
-        db = next(get_db())
+        db = SessionLocal()
         seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
         if not seq:
             return
@@ -874,6 +890,9 @@ def handle_edit_modal_submit(ack, body, client, say):
 
     except Exception as e:
         logger.error(f"handle_edit_modal_submit failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 @app.action(re.compile(r"approve_step_.*"))
@@ -882,11 +901,12 @@ def handle_approve_step(ack, body, say):
     value = body["actions"][0]["value"]
     thread_ts = body["message"]["ts"]
 
+    db = None
     try:
         sequence_id, step_number_str = value.split(":", 1)
         step_number = int(step_number_str)
 
-        db = next(get_db())
+        db = SessionLocal()
         seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
         if not seq:
             return
@@ -906,6 +926,9 @@ def handle_approve_step(ack, body, say):
 
     except Exception as e:
         logger.error(f"handle_approve_step failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -919,8 +942,9 @@ def handle_approve_sequence(ack, body, say):
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         seq = db.query(Sequence).filter(Sequence.id == sequence_id).first()
         if not seq:
             say(text="Sequence not found.", thread_ts=thread_ts)
@@ -958,6 +982,9 @@ def handle_approve_sequence(ack, body, say):
     except Exception as e:
         logger.error(f"approve_sequence failed for {sequence_id}: {e}", exc_info=True)
         say(text="Something went wrong delivering the brief.", thread_ts=thread_ts)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -971,8 +998,9 @@ def handle_approve_all_sequences(ack, body, say):
     user_id = body["user"]["id"]
     thread_ts = body["message"]["ts"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             say(text="Session not found.", thread_ts=thread_ts)
@@ -1014,6 +1042,9 @@ def handle_approve_all_sequences(ack, body, say):
     except Exception as e:
         logger.error(f"handle_approve_all_sequences failed for {session_id}: {e}", exc_info=True)
         say(text="Something went wrong delivering briefs.", thread_ts=thread_ts)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1055,8 +1086,9 @@ def handle_resume_session(ack, body, say):
     ack()
     session_id = body["actions"][0]["value"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             say(text="Session not found. Please start a new request.")
@@ -1124,6 +1156,9 @@ def handle_resume_session(ack, body, say):
     except Exception as e:
         logger.error(f"handle_resume_session failed: {e}", exc_info=True)
         say(text="Something went wrong resuming your session.")
+    finally:
+        if db:
+            db.close()
 
 
 @app.action("cancel_session")
@@ -1131,8 +1166,9 @@ def handle_cancel_session(ack, body, say):
     ack()
     session_id = body["actions"][0]["value"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if session:
             session.status = "cancelled"
@@ -1140,6 +1176,9 @@ def handle_cancel_session(ack, body, say):
         say(text="Thread cancelled. Start a new account anytime by sending a message.")
     except Exception as e:
         logger.error(f"handle_cancel_session failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1153,8 +1192,9 @@ def handle_edit_intent(ack, body, client):
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             return
@@ -1172,6 +1212,9 @@ def handle_edit_intent(ack, body, client):
         )
     except Exception as e:
         logger.error(f"handle_edit_intent failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 @app.action("submit_edit")
@@ -1197,8 +1240,9 @@ def handle_submit_edit(ack, body, client):
             val = (block_values.get("edit_angle_input", {}).get("value") or "").strip()
             use_case_angle = val or None
 
+    db = None
     try:
-        db = next(get_db())
+        db = SessionLocal()
         session = db.query(Session).filter(Session.id == session_id).first()
         if not session:
             return
@@ -1226,6 +1270,9 @@ def handle_submit_edit(ack, body, client):
         )
     except Exception as e:
         logger.error(f"handle_submit_edit failed: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
 
 
 @app.action("submit_clarification")

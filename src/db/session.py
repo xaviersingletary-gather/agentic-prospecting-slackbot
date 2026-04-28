@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from src.config import settings
@@ -6,7 +8,7 @@ from src.db.models import Base
 engine = (
     create_engine(
         settings.DATABASE_URL,
-        connect_args={"connect_timeout": 10, "options": "-c statement_timeout=10000"},
+        connect_args={"connect_timeout": 10, "options": "-c statement_timeout=30000"},
         pool_pre_ping=True,
     )
     if settings.DATABASE_URL
@@ -45,6 +47,25 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # column already exists or lock contention — safe to ignore
+        # Reset session-level GUC settings so this connection is clean when returned to pool
+        try:
+            conn.execute(text("RESET lock_timeout"))
+            conn.execute(text("RESET statement_timeout"))
+            conn.commit()
+        except Exception:
+            pass
+
+
+@contextmanager
+def get_session():
+    """Context manager that properly closes the session on exit. Use instead of next(get_db())."""
+    if not SessionLocal:
+        raise RuntimeError("DATABASE_URL is not set")
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def get_db():
