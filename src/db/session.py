@@ -8,7 +8,7 @@ from src.db.models import Base
 engine = (
     create_engine(
         settings.DATABASE_URL,
-        connect_args={"connect_timeout": 10, "options": "-c statement_timeout=30000"},
+        connect_args={"connect_timeout": 10},
         pool_pre_ping=True,
     )
     if settings.DATABASE_URL
@@ -30,30 +30,19 @@ _COLUMN_MIGRATIONS = [
 def init_db():
     if not engine:
         raise RuntimeError("DATABASE_URL is not set")
-    # Use lock_timeout='1ms' so DDL never waits for locks held by another container.
-    # If create_all() can't acquire locks immediately, it raises LockNotAvailable
-    # which is caught and ignored (tables already exist from previous deploys).
-    with engine.connect() as conn:
-        conn.execute(text("SET lock_timeout = '1ms'"))
-        conn.execute(text("SET statement_timeout = '10s'"))
+    # Run all DDL in AUTOCOMMIT mode so each statement commits immediately.
+    # This means no transaction is open between statements — no table locks are held
+    # that could block DML from handler connections running concurrently.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         try:
             Base.metadata.create_all(bind=conn)
         except Exception:
-            pass  # tables likely already exist; lock contention is expected on rolling deploys
-        # Apply additive column migrations — idempotent
+            pass  # tables already exist on rolling deploys
         for sql in _COLUMN_MIGRATIONS:
             try:
                 conn.execute(text(sql))
-                conn.commit()
             except Exception:
-                pass  # column already exists or lock contention — safe to ignore
-        # Reset session-level GUC settings so this connection is clean when returned to pool
-        try:
-            conn.execute(text("RESET lock_timeout"))
-            conn.execute(text("RESET statement_timeout"))
-            conn.commit()
-        except Exception:
-            pass
+                pass  # column already exists — safe to ignore
 
 
 @contextmanager
