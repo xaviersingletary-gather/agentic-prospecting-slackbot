@@ -68,17 +68,30 @@ if settings.SENTRY_DSN:
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
-app = App(token=settings.SLACK_BOT_TOKEN)
-normalizer = InputNormalizerAgent()
-discovery = PersonaDiscoveryAgent()
-scorer = ScorerAgent()
-generator = SequenceGeneratorAgent()
-editor = SequenceEditorAgent()
-researcher = CompanyResearchAgent()
-contact_researcher_agent = ContactResearchAgent()
-sales_play_agent = SalesPlayAgent()
-theme_router = ThemeRouterAgent()
-drive = GoogleDriveClient()
+print("STARTUP: initializing Slack App...", flush=True)
+try:
+    app = App(token=settings.SLACK_BOT_TOKEN)
+except Exception as _e:
+    print(f"FATAL: App() failed: {_e}", flush=True)
+    sys.exit(1)
+
+print("STARTUP: initializing agents...", flush=True)
+try:
+    normalizer = InputNormalizerAgent()
+    discovery = PersonaDiscoveryAgent()
+    scorer = ScorerAgent()
+    generator = SequenceGeneratorAgent()
+    editor = SequenceEditorAgent()
+    researcher = CompanyResearchAgent()
+    contact_researcher_agent = ContactResearchAgent()
+    sales_play_agent = SalesPlayAgent()
+    theme_router = ThemeRouterAgent()
+    drive = GoogleDriveClient()
+except Exception as _e:
+    print(f"FATAL: agent init failed: {_e}", flush=True)
+    sys.exit(1)
+
+print("STARTUP: all agents ready", flush=True)
 
 REP_ROLES = {}  # slack user_id -> "AE" | "MDR"
 
