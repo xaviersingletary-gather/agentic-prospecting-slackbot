@@ -6,7 +6,7 @@ from src.db.models import Base
 engine = (
     create_engine(
         settings.DATABASE_URL,
-        connect_args={"connect_timeout": 10},
+        connect_args={"connect_timeout": 10, "options": "-c statement_timeout=10000"},
         pool_pre_ping=True,
     )
     if settings.DATABASE_URL

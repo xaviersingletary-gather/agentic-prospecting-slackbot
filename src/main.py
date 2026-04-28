@@ -145,6 +145,7 @@ def handle_message(message, say, client):
     )
     normalized = normalizer.normalize(request)
 
+    logger.info(f"[handle_message] persisting session {session_id}")
     try:
         db = next(get_db())
         session = Session(
@@ -161,10 +162,13 @@ def handle_message(message, say, client):
         )
         db.add(session)
         db.commit()
+        logger.info(f"[handle_message] session committed OK")
     except Exception as e:
         logger.error(f"Failed to persist session: {e}")
 
+    logger.info(f"[handle_message] logging session_started event")
     log_event(session_id, "session_started", 1, user_id, {"raw_message": text})
+    logger.info(f"[handle_message] event logged")
 
     # Light warning if other threads are still in progress (non-blocking)
     try:
