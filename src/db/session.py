@@ -3,7 +3,15 @@ from sqlalchemy.orm import sessionmaker
 from src.config import settings
 from src.db.models import Base
 
-engine = create_engine(settings.DATABASE_URL) if settings.DATABASE_URL else None
+engine = (
+    create_engine(
+        settings.DATABASE_URL,
+        connect_args={"connect_timeout": 10},
+        pool_pre_ping=True,
+    )
+    if settings.DATABASE_URL
+    else None
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine else None
 
 # Columns added after initial schema — safe to run every startup (IF NOT EXISTS)
