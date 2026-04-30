@@ -3,7 +3,7 @@
 Returns an ephemeral Block Kit message with current version, capabilities,
 upcoming roadmap items (V1.2 / V1.3 / V2.0) and a contact line.
 """
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 from src.config import VERSION
 
@@ -62,19 +62,13 @@ def build_about_blocks() -> List[Dict[str, Any]]:
     ]
 
 
-async def _maybe_await(value):
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-async def handle_about_command(
+def handle_about_command(
     payload: Dict[str, Any],
-    ack: Callable[..., Awaitable[Any]],
-    respond: Callable[..., Awaitable[Any]],
+    ack: Callable[..., Any],
+    respond: Callable[..., Any],
 ) -> None:
-    await _maybe_await(ack())
-    await respond(
+    ack()
+    respond(
         response_type="ephemeral",
         blocks=build_about_blocks(),
         text=f"Account Research Bot v{VERSION}",

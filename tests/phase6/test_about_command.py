@@ -1,7 +1,5 @@
 """Spec §1.6 — /about slash command surfaces version + roadmap."""
-from unittest.mock import AsyncMock
-
-import pytest
+from unittest.mock import MagicMock
 
 
 def _flatten_blocks(blocks):
@@ -55,30 +53,28 @@ def test_about_blocks_include_contact_line():
     assert "Xavier" in text or "xavier" in text.lower()
 
 
-@pytest.mark.asyncio
-async def test_handle_about_responds_ephemerally():
+def test_handle_about_responds_ephemerally():
     from src.handlers.about import handle_about_command
 
-    ack = AsyncMock()
-    respond = AsyncMock()
-    await handle_about_command(
+    ack = MagicMock()
+    respond = MagicMock()
+    handle_about_command(
         payload={"user_id": "U1", "command": "/about"},
         ack=ack,
         respond=respond,
     )
-    ack.assert_awaited()
-    respond.assert_awaited()
+    ack.assert_called()
+    respond.assert_called()
     kwargs = respond.call_args.kwargs
     assert kwargs.get("response_type") == "ephemeral"
 
 
-@pytest.mark.asyncio
-async def test_handle_about_includes_blocks_in_response():
+def test_handle_about_includes_blocks_in_response():
     from src.handlers.about import handle_about_command
 
-    ack = AsyncMock()
-    respond = AsyncMock()
-    await handle_about_command(
+    ack = MagicMock()
+    respond = MagicMock()
+    handle_about_command(
         payload={"user_id": "U1", "command": "/about"},
         ack=ack,
         respond=respond,

@@ -7,7 +7,7 @@ someone else's thread. Every state-mutating handler must verify
 This phase introduces the reusable `assert_session_owner` primitive in
 `src/security/`. Subsequent state-mutating handlers must call it.
 """
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -75,8 +75,8 @@ def _payload_for_run_button(session_id: str, user_id: str, selected=None):
     }
 
 
-@pytest.mark.asyncio
-async def test_handler_refuses_to_mutate_when_user_is_not_session_owner():
+
+def test_handler_refuses_to_mutate_when_user_is_not_session_owner():
     from src.research.sessions import create_session, get_session
     from src.handlers.persona_select import handle_run_research_action
 
@@ -86,9 +86,9 @@ async def test_handler_refuses_to_mutate_when_user_is_not_session_owner():
         s.session_id, user_id="U_REP_B", selected=["csco"],
     )
 
-    ack = AsyncMock()
-    respond = AsyncMock()
-    await handle_run_research_action(payload=payload, ack=ack, respond=respond)
+    ack = MagicMock()
+    respond = MagicMock()
+    handle_run_research_action(payload=payload, ack=ack, respond=respond)
 
     # State must not have been mutated
     assert get_session(s.session_id).personas == []
@@ -97,8 +97,8 @@ async def test_handler_refuses_to_mutate_when_user_is_not_session_owner():
     assert "own" in text or "authoriz" in text or "permission" in text
 
 
-@pytest.mark.asyncio
-async def test_handler_does_not_call_research_pipeline_when_unauthorized(mocker):
+
+def test_handler_does_not_call_research_pipeline_when_unauthorized(mocker):
     """Even if a research-kickoff function existed, it must not run for an
     unauthorized clicker. We patch a sentinel and assert it was not called.
     """
@@ -114,8 +114,8 @@ async def test_handler_does_not_call_research_pipeline_when_unauthorized(mocker)
     # call. Phase 3 ships the auth check; later phases attach real work here.
     sentinel = mocker.patch.object(ps, "kickoff_research", create=True)
 
-    ack = AsyncMock()
-    respond = AsyncMock()
-    await ps.handle_run_research_action(payload=payload, ack=ack, respond=respond)
+    ack = MagicMock()
+    respond = MagicMock()
+    ps.handle_run_research_action(payload=payload, ack=ack, respond=respond)
 
     sentinel.assert_not_called()
