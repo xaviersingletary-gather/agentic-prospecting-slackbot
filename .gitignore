@@ -15,6 +15,7 @@ build/
 
 # Logs
 *.log
+logs/*.jsonl
 
 # macOS
 .DS_Store
