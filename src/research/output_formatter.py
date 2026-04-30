@@ -19,9 +19,13 @@ Empty sections render with "No public data found" except the DC section,
 which uses the spec-mandated "Could not confirm DC count from public sources".
 No outreach / messaging content is ever produced — that is a V2 feature.
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.security.safe_mrkdwn import safe_mrkdwn
+from src.utils.citation_validator import (
+    UNVERIFIED_PREFIX,
+    is_unsourced_dc_count,
+)
 
 NO_DATA = "No public data found"
 DC_NO_DATA = "Could not confirm DC count from public sources"
@@ -35,24 +39,41 @@ _FACT_SECTIONS = [
 ]
 
 
-def _render_fact_bullet(item: Dict[str, str]) -> str:
+def _render_fact_bullet(item: Dict[str, str], *, is_dc: bool) -> Optional[str]:
+    """Return a rendered bullet, or None if the item must be dropped.
+
+    DC intel items without a source URL are dropped (spec §1.4 — DC counts
+    must never appear unsourced). Other unsourced facts are flagged with
+    `⚠️ [Unverified]` instead of being dropped.
+    """
     claim = safe_mrkdwn(item.get("claim", ""))
     url = safe_mrkdwn(item.get("source_url", ""))
     if claim and url:
         return f"• {claim} — {url}"
-    if claim:
-        return f"• {claim}"
-    return f"• {url}"
+    if not claim:
+        return None
+    # Unsourced claim from here on
+    if is_dc and is_unsourced_dc_count(claim):
+        return None
+    if is_dc:
+        # Even non-DC-count items inside the DC section are risky; drop unsourced.
+        return None
+    return f"• {UNVERIFIED_PREFIX} — {claim}"
 
 
 def _render_fact_section(header: str, key: str, findings: Dict[str, Any]) -> str:
     items: List[Dict[str, str]] = findings.get(key) or []
+    is_dc = key == "dc_intel"
+    rendered: List[str] = []
+    for item in items:
+        bullet = _render_fact_bullet(item, is_dc=is_dc)
+        if bullet is not None:
+            rendered.append(bullet)
     lines = [header]
-    if items:
-        for item in items:
-            lines.append(_render_fact_bullet(item))
+    if rendered:
+        lines.extend(rendered)
     else:
-        lines.append("• " + (DC_NO_DATA if key == "dc_intel" else NO_DATA))
+        lines.append("• " + (DC_NO_DATA if is_dc else NO_DATA))
     return "\n".join(lines)
 
 
