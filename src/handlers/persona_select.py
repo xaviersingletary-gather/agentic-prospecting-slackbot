@@ -9,6 +9,7 @@ Sync by design — the legacy slack-bolt App is sync; AsyncApp is not used.
 """
 from typing import Any, Callable, Dict, List
 
+from src.research.runner import run_research
 from src.research.sessions import get_session, update_personas
 from src.security.session_auth import (
     UnauthorizedSessionError,
@@ -16,11 +17,11 @@ from src.security.session_auth import (
 )
 
 
-# Sentinel that future phases will replace with the real research kickoff.
-# Kept patchable so the security test can assert it is *not* called when the
-# clicker is unauthorized.
-def kickoff_research(session) -> None:  # pragma: no cover - placeholder
-    return None
+def kickoff_research(session, respond: Callable[..., Any]) -> None:
+    """Thin shim — kept patchable so security tests can assert it is not
+    called for unauthorized clickers, and so future phases can swap the
+    runner implementation without touching the handler."""
+    run_research(session, respond)
 
 
 def _extract_session_id(payload: Dict[str, Any]) -> str:
@@ -90,11 +91,4 @@ def handle_run_research_action(
         return
 
     update_personas(session_id, selected)
-    kickoff_research(sess)
-    respond(
-        text=(
-            f"Research started for {sess.account_name} "
-            f"({len(selected)} persona{'s' if len(selected) != 1 else ''})."
-        ),
-        response_type="ephemeral",
-    )
+    kickoff_research(sess, respond)
