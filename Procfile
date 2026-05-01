@@ -1,1 +1,1 @@
-worker: python -u src/main.py
+web: python -u -m src.entrypoint

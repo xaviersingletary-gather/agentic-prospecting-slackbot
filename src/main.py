@@ -119,6 +119,35 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
 
 
 # ---------------------------------------------------------------------------
+# Account Research Bot v1 — slash commands + persona-select action
+# (added by feat/phase-1-railway; runs alongside the legacy DM flow below.)
+# ---------------------------------------------------------------------------
+
+from src.handlers.research_command import handle_research_command as _v1_research_cmd
+from src.handlers.about import handle_about_command as _v1_about_cmd
+from src.handlers.persona_select import handle_run_research_action as _v1_run_research_action
+
+
+@app.command("/research")
+def _v1_cmd_research(ack, respond, command):
+    _v1_research_cmd(command=command, ack=ack, respond=respond)
+
+
+@app.command("/about")
+def _v1_cmd_about(ack, respond, command):
+    _v1_about_cmd(payload=command, ack=ack, respond=respond)
+
+
+@app.action("run_research")
+def _v1_action_run_research(ack, body, respond):
+    _v1_run_research_action(payload=body, ack=ack, respond=respond)
+
+
+# ---------------------------------------------------------------------------
+# Legacy prototype — DM-based prospecting flow. Untouched.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Phase 1 — Message intake + confirmation card
 # ---------------------------------------------------------------------------
 

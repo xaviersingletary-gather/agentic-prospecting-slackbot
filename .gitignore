@@ -1,8 +1,13 @@
 # Environment
 .env
 
-# Google credentials
-*.json
+# Credentials — scoped to avoid catching railway.json / settings JSON.
+# Anything that looks like a service-account or secret file stays out.
+*credentials*.json
+*service-account*.json
+*-key.json
+gcp-*.json
+secret*.json
 
 # Python
 __pycache__/
