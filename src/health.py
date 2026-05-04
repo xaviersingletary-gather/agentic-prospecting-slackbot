@@ -1,3 +1,5 @@
+import asyncio
+
 from aiohttp import web
 
 from src.config import VERSION
@@ -25,4 +27,13 @@ def create_health_app() -> web.Application:
 
 
 def run_health_server(host: str = "0.0.0.0", port: int = 8080) -> None:
-    web.run_app(create_health_app(), host=host, port=port, print=None)
+    # web.run_app() installs signal handlers, which only works on the main
+    # thread. We start the bot on the main thread and the health server on a
+    # worker thread, so use AppRunner/TCPSite directly with a fresh loop.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    runner = web.AppRunner(create_health_app())
+    loop.run_until_complete(runner.setup())
+    site = web.TCPSite(runner, host=host, port=port)
+    loop.run_until_complete(site.start())
+    loop.run_forever()
