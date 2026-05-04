@@ -136,6 +136,14 @@ def _v1_action_run_research(ack, body, respond):
     _v1_run_research_action(payload=body, ack=ack, respond=respond)
 
 
+@app.action("persona_checkboxes")
+def _v1_action_persona_checkboxes(ack):
+    # No-op — checkbox state is read from `state.values` when the rep
+    # clicks Run Research. We register the handler only to suppress
+    # Bolt's "unhandled request" 404 noise.
+    ack()
+
+
 @app.message()
 def handle_message(message, say):
     _v1_handle_dm(message=message, say=say)

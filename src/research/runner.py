@@ -1,19 +1,22 @@
-"""Research runner — orchestrates the full Account Research Bot v1 output.
+"""Research runner — orchestrates the V1.5 staged Account Research flow.
 
-Composition (top → bottom in Slack):
-  1. HubSpot account snapshot block (or "not found" / omitted)
-  2. 5-section research findings (Phase 11 — Exa + Claude)
-  3. Tagged contact list (Apollo + HubSpot — Phases 7 + 13)
+Staged flow (new in V1.5):
+  Stage 1 — `run_account_research(session, post)`
+      Findings (Exa + OpenRouter) + HubSpot account snapshot.
+      Fires immediately on DM, BEFORE the rep picks personas.
 
-Every external dependency is soft-failed:
-- Missing env vars yield None clients via the factory; the runner
-  inspects each and degrades gracefully.
-- Any exception in any module is caught at the runner boundary, logged
-  via `safe_log_exception`, and surfaced in the rendered output as a
-  warning banner or research_gap. **The runner never raises.**
+  Stage 2 — `run_persona_research(session, respond)`
+      Apollo contact pull tagged against HubSpot, scoped to the personas
+      the rep selected. Fires on `Run Research` button click.
 
-Phase 9 back-compat: `build_placeholder_findings` is kept as a thin
-delegating alias to `build_findings`. Phase 9 tests still import it.
+`run_research` (legacy, full flow) is kept for back-compat with the
+Phase 13 integration tests — it just composes the two stages.
+
+Every external dependency is soft-failed. Missing env vars yield None
+clients via the factory; the runner inspects each and degrades
+gracefully. Any exception in any module is caught at the runner
+boundary, logged via `safe_log_exception`, and surfaced in output as a
+warning banner or research_gap. **The runner functions never raise.**
 """
 from __future__ import annotations
 
@@ -43,39 +46,96 @@ logger = logging.getLogger(__name__)
 
 
 def build_placeholder_findings(session: ResearchSession) -> Dict[str, Any]:
-    """Deprecated alias. Delegates to `build_findings`. Kept so existing
-    callers (Phase 9 tests, handlers that imported the old name) keep
-    working without modification.
-    """
+    """Deprecated alias. Delegates to `build_findings`."""
     return build_findings(session)
 
 
-def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
-    """Build the full research dump and post it back to Slack.
+# ---------------------------------------------------------------------------
+# Stage 1 — Account research (findings + HubSpot snapshot)
+# ---------------------------------------------------------------------------
 
-    Always calls `respond` exactly once. Never raises.
+def run_account_research(
+    session: ResearchSession,
+    post: Callable[..., Any],
+) -> None:
+    """Build findings + HubSpot snapshot and post them.
+
+    `post` is the Slack posting callable — `say` from the message handler
+    is the typical caller. Always invoked exactly once. Never raises.
     """
-    blocks: List[Dict[str, Any]] = []
+    blocks = _build_account_blocks(session)
+    try:
+        post(
+            blocks=blocks,
+            text=f"Research for {session.account_name}",
+        )
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "account research post() failed")
 
-    # ------------------------------------------------------------------
-    # Build clients lazily — re-reads env each call so adding a Railway
-    # variable takes effect on the next invocation.
-    # ------------------------------------------------------------------
-    apollo_client = _safe_call(get_apollo_client, "apollo client init")
-    hs_contact_client = _safe_call(
-        get_hubspot_contact_client, "hubspot contact client init"
-    )
+
+# ---------------------------------------------------------------------------
+# Stage 2 — Persona contact pull
+# ---------------------------------------------------------------------------
+
+def run_persona_research(
+    session: ResearchSession,
+    respond: Callable[..., Any],
+) -> None:
+    """Build Apollo+HubSpot tagged contacts for the selected personas.
+
+    Posts as an ephemeral block_actions response that does NOT replace
+    the persona card — we want the rep to see both their selection AND
+    the resulting contacts.
+    """
+    blocks = _build_persona_blocks(session)
+    try:
+        respond(
+            response_type="ephemeral",
+            replace_original=False,
+            blocks=blocks,
+            text=f"Contacts for {session.account_name}",
+        )
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "persona research respond() failed")
+
+
+# ---------------------------------------------------------------------------
+# Legacy full flow — used by Phase 13 integration tests
+# ---------------------------------------------------------------------------
+
+def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
+    """Legacy single-shot flow: snapshot + findings + contacts in one post.
+
+    Kept so Phase 13 integration tests still pass without modification.
+    Production no longer calls this — the DM handler runs Stage 1, the
+    persona-button handler runs Stage 2.
+    """
+    blocks = _build_account_blocks(session) + _build_persona_blocks(session)
+    try:
+        respond(
+            response_type="ephemeral",
+            replace_original=True,
+            blocks=blocks,
+            text=f"Research for {session.account_name}",
+        )
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "respond() failed")
+
+
+# ---------------------------------------------------------------------------
+# Internal builders
+# ---------------------------------------------------------------------------
+
+def _build_account_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
+    """Findings + HubSpot snapshot blocks. Never raises."""
     hs_account_client = _safe_call(
         get_hubspot_account_client, "hubspot account client init"
     )
     portal_id = _safe_call(get_hubspot_portal_id, "hubspot portal id read")
 
-    # ------------------------------------------------------------------
-    # 1. Findings — Phase 11 pipeline. build_findings never raises.
-    # ------------------------------------------------------------------
     try:
         findings = build_findings(session)
-    except Exception as e:  # belt-and-braces — should not happen
+    except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, "build_findings raised unexpectedly")
         findings = {
             "account_name": session.account_name,
@@ -88,9 +148,32 @@ def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
             ],
         }
 
-    # ------------------------------------------------------------------
-    # 2. Contacts — Apollo + HubSpot tagging
-    # ------------------------------------------------------------------
+    snapshot_blocks: List[Dict[str, Any]] = []
+    if hs_account_client is not None and portal_id:
+        domain = resolve_domain(session.account_name, [])
+        try:
+            snap = get_account_snapshot(
+                hs_account_client, session.account_name, domain, portal_id
+            )
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "account snapshot lookup raised")
+            snap = None
+        snapshot_blocks = (
+            build_account_snapshot_blocks(snap) if snap is not None
+            else build_account_not_found_blocks(session.account_name)
+        )
+
+    return snapshot_blocks + build_research_blocks(findings)
+
+
+def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
+    """Apollo+HubSpot tagged contact blocks. Never raises."""
+    apollo_client = _safe_call(get_apollo_client, "apollo client init")
+    hs_contact_client = _safe_call(
+        get_hubspot_contact_client, "hubspot contact client init"
+    )
+    portal_id = _safe_call(get_hubspot_portal_id, "hubspot portal id read")
+
     try:
         tag_result = build_tagged_contacts(
             session,
@@ -100,49 +183,9 @@ def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
         )
     except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, "build_tagged_contacts raised")
-        tag_result = {
-            "contacts": [],
-            "warning": "Contact pipeline failed",
-        }
+        tag_result = {"contacts": [], "warning": "Contact pipeline failed"}
 
-    # ------------------------------------------------------------------
-    # 3. HubSpot account snapshot — only when account client + portal id
-    #    are present.
-    # ------------------------------------------------------------------
-    snapshot_blocks: List[Dict[str, Any]] = []
-    if hs_account_client is not None and portal_id:
-        domain = resolve_domain(session.account_name, tag_result.get("contacts") or [])
-        try:
-            snap = get_account_snapshot(
-                hs_account_client, session.account_name, domain, portal_id
-            )
-        except Exception as e:  # belt-and-braces
-            safe_log_exception(logger, e, "account snapshot lookup raised")
-            snap = None
-
-        if snap is not None:
-            snapshot_blocks = build_account_snapshot_blocks(snap)
-        else:
-            snapshot_blocks = build_account_not_found_blocks(session.account_name)
-
-    # ------------------------------------------------------------------
-    # Compose
-    # ------------------------------------------------------------------
-    blocks.extend(snapshot_blocks)
-    blocks.extend(build_research_blocks(findings))
-    blocks.extend(build_contact_blocks(tag_result))
-
-    try:
-        respond(
-            response_type="ephemeral",
-            replace_original=True,
-            blocks=blocks,
-            text=f"Research for {session.account_name}",
-        )
-    except Exception as e:  # noqa: BLE001
-        # Slack post itself failed — we cannot surface it via Slack.
-        # Log and swallow so the runner contract (no raise) still holds.
-        safe_log_exception(logger, e, "respond() failed")
+    return build_contact_blocks(tag_result)
 
 
 def _safe_call(fn: Callable[[], Any], label: str) -> Optional[Any]:

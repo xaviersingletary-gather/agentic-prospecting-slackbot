@@ -93,7 +93,7 @@ def test_kickoff_research_delegates_to_runner(mocker):
     from src.research.sessions import create_session
 
     s = create_session(rep_id="U_REP", account_name="Kroger")
-    spy = mocker.patch("src.handlers.persona_select.run_research")
+    spy = mocker.patch("src.handlers.persona_select.run_persona_research")
     respond = MagicMock()
 
     ps.kickoff_research(s, respond)

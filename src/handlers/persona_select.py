@@ -9,7 +9,7 @@ Sync by design — the legacy slack-bolt App is sync; AsyncApp is not used.
 """
 from typing import Any, Callable, Dict, List
 
-from src.research.runner import run_research
+from src.research.runner import run_persona_research
 from src.research.sessions import get_session, update_personas
 from src.security.session_auth import (
     UnauthorizedSessionError,
@@ -19,9 +19,10 @@ from src.security.session_auth import (
 
 def kickoff_research(session, respond: Callable[..., Any]) -> None:
     """Thin shim — kept patchable so security tests can assert it is not
-    called for unauthorized clickers, and so future phases can swap the
-    runner implementation without touching the handler."""
-    run_research(session, respond)
+    called for unauthorized clickers. V1.5: only the persona contact
+    pull runs here; account findings + snapshot already posted in the
+    DM handler."""
+    run_persona_research(session, respond)
 
 
 def _extract_session_id(payload: Dict[str, Any]) -> str:

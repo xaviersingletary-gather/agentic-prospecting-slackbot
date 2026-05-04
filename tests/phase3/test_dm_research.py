@@ -5,9 +5,10 @@ Covers:
 - Bare account name passes through unchanged.
 - Bot/edit messages are ignored.
 - Empty / unintelligible text gets a usage-hint reply, no session created.
-- A valid DM creates a session and posts the persona-checkbox card.
+- A valid DM creates a session, runs Stage 1 account research, and posts
+  the persona-checkbox card last.
 """
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,6 +19,14 @@ def _reset_sessions():
     sessions._reset_for_tests()
     yield
     sessions._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _stub_account_research():
+    """Stub Stage 1 — these tests focus on DM-handler behavior, not the
+    findings/snapshot pipeline (covered in Phase 11/13 tests)."""
+    with patch("src.handlers.dm_research.run_account_research") as m:
+        yield m
 
 
 def _msg(text, user="U1", bot_id=None, subtype=None):
@@ -61,22 +70,26 @@ def test_empty_text_returns_empty():
 # Handler behavior
 # ---------------------------------------------------------------------------
 
-def test_dm_with_account_name_creates_session_and_posts_persona_card():
+def test_dm_with_account_name_creates_session_and_posts_persona_card(_stub_account_research):
     from src.handlers.dm_research import handle_research_dm
     from src.research.sessions import _SESSIONS
 
     say = MagicMock()
     handle_research_dm(message=_msg("research Kroger"), say=say)
 
-    say.assert_called_once()
-    kwargs = say.call_args.kwargs
-    blocks = kwargs.get("blocks")
+    # V1.5 flow: placeholder → Stage 1 (stubbed) → persona-checkbox card.
+    # `say` is called for the placeholder and the persona card; Stage 1
+    # is stubbed and would otherwise call say a third time.
+    assert say.call_count >= 2
+    # Stage 1 was invoked
+    _stub_account_research.assert_called_once()
+    # Persona card is the LAST say() call
+    last_kwargs = say.call_args_list[-1].kwargs
+    blocks = last_kwargs.get("blocks")
     assert isinstance(blocks, list) and blocks
-    # 4 persona checkboxes rendered
     actions = next(b for b in blocks if b.get("type") == "actions")
     checkboxes = next(e for e in actions["elements"] if e.get("type") == "checkboxes")
     assert len(checkboxes["options"]) == 4
-    # Run Research button present
     buttons = [e for e in actions["elements"] if e.get("type") == "button"]
     assert any(b.get("action_id") == "run_research" for b in buttons)
     # Session created

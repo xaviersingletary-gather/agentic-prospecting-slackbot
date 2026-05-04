@@ -18,6 +18,7 @@ import re
 from typing import Any, Callable, Dict, Optional
 
 from src.research.persona_blocks import build_persona_select_blocks
+from src.research.runner import run_account_research
 from src.research.sessions import create_session
 from src.security.log_redact import redact_user_text
 
@@ -116,6 +117,14 @@ def handle_research_dm(
 
     session = create_session(rep_id=user_id, account_name=account_name)
 
+    # Stage 0 — immediate placeholder so the DM doesn't look dead while
+    # Exa + OpenRouter run (~10-15s).
+    say(text=f":mag: Researching *{account_name}*…")
+
+    # Stage 1 — account research (findings + HubSpot snapshot).
+    run_account_research(session, say)
+
+    # Stage 2 prep — persona-checkbox card. Click triggers run_persona_research.
     say(
         blocks=build_persona_select_blocks(
             account_name=account_name,
