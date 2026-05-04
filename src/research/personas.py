@@ -1,7 +1,15 @@
-"""The four ICP personas the Account Research Bot scopes to (spec §1.3).
+"""The four ICP personas the Account Research Bot scopes to.
 
-Each persona maps to a list of Apollo title keywords used to filter the
-contact pull. Keys are stable identifiers used in Slack action values.
+Aligned to the Gather AI Knowledge Base buyer-persona framework:
+  1. Technical Lead — primary entry point in new logo deals (CI / Automation /
+     Industrial Engineering directors). Most likely to book a first meeting.
+  2. Operations Lead — owns adoption (VP Ops, GM Warehouse, Inventory Control).
+     Second-best meeting booker.
+  3. Executive — CSCO / COO / SVP Ops. Engaged late; hard to cold-book but the
+     #1 closed-lost gap when missed.
+  4. Compliance Lead — IT + Safety/EHS gatekeepers. Surface late = deal risk.
+
+Keys are stable identifiers used in Slack action values and session state.
 """
 from typing import Dict, Iterable, List, TypedDict
 
@@ -12,35 +20,80 @@ class PersonaConfig(TypedDict):
 
 
 PERSONAS: Dict[str, PersonaConfig] = {
-    "csco": {
-        "label": "CSCO / Chief Supply Chain Officer",
-        "title_keywords": ["Chief Supply Chain", "CSCO", "SVP Supply Chain"],
-    },
-    "vp_warehouse_ops": {
-        "label": "VP Warehouse Operations",
+    "technical_lead": {
+        "label": "Technical Lead — CI / Automation / Engineering",
         "title_keywords": [
-            "VP Warehouse",
+            "Continuous Improvement",
+            "Director of Continuous Improvement",
+            "Director of CI",
+            "Industrial Engineer",
+            "Industrial Engineering",
+            "Automation Engineering",
+            "Automation Manager",
+            "Director of Automation",
+            "VP Engineering",
+            "VP of Engineering",
+            "VP of Logistics Technology",
+            "Manufacturing Technology",
+            "Process Improvement",
+            "Innovation Engineer",
+            "Head of Engineering",
+            "Director of Industrial Engineering",
+            "Director of Process Improvement",
+        ],
+    },
+    "operations_lead": {
+        "label": "Operations Lead — Warehouse / DC / Inventory Ops",
+        "title_keywords": [
             "VP Operations",
+            "VP of Operations",
+            "Director of Operations",
+            "VP Warehouse",
+            "VP of Warehouse",
+            "Director of Warehouse",
+            "Director of Distribution",
+            "GM Warehouse",
             "Head of Warehouse",
-            "Director Warehouse Operations",
+            "Director of Inventory",
+            "Director of Supply Chain",
+            "Director of ICQA",
+            "Inventory Control Manager",
+            "ICQA Manager",
+            "Sr. Manager DC Operations",
+            "VP Fulfillment",
+            "VP of Fulfillment",
+            "Director of Fulfillment",
         ],
     },
-    "vp_inventory_planning": {
-        "label": "VP Inventory & Planning",
+    "executive": {
+        "label": "Executive — CSCO / COO / SVP Ops",
         "title_keywords": [
-            "VP Inventory",
-            "VP Planning",
-            "VP S&OP",
-            "Director Inventory",
+            "Chief Supply Chain",
+            "CSCO",
+            "Chief Operating Officer",
+            "COO",
+            "EVP Operations",
+            "SVP Operations",
+            "EVP Supply Chain",
+            "SVP Supply Chain",
+            "Head of Network Operations",
         ],
     },
-    "sop_lead": {
-        "label": "S&OP Lead / Director",
+    "compliance_lead": {
+        "label": "Compliance Lead — IT / Safety / EHS",
         "title_keywords": [
-            "S&OP",
-            "Sales and Operations",
-            "Demand Planning Director",
-            "Supply Planning",
+            "Director of Infrastructure",
+            "VP of Information Technology",
+            "VP IT",
+            "Director of IT",
+            "Director of Enterprise Architecture",
+            "WMS Systems",
+            "Director of EHS",
+            "VP Risk Management",
+            "VP Health Safety",
+            "Director of Operations Risk",
+            "Corporate Safety Director",
+            "Director of Loss Prevention",
         ],
     },
 }

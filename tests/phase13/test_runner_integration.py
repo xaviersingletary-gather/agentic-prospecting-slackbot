@@ -135,7 +135,7 @@ def test_all_envs_set_renders_snapshot_research_and_contacts(monkeypatch, mocker
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops"]
+    s.personas = ["operations_lead"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -164,7 +164,7 @@ def test_apollo_missing_no_contacts_warning_visible(monkeypatch, mocker):
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops"]
+    s.personas = ["operations_lead"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -189,7 +189,7 @@ def test_hubspot_missing_contacts_untagged_snapshot_omitted(monkeypatch, mocker)
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops"]
+    s.personas = ["operations_lead"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -226,7 +226,7 @@ def test_openrouter_missing_empty_findings_with_gap(monkeypatch, mocker):
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -256,7 +256,7 @@ def test_exa_missing_runner_still_responds(monkeypatch, mocker):
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -278,7 +278,7 @@ def test_zero_envs_set_runner_still_responds_with_headers(monkeypatch, mocker):
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     runner.run_research(s, respond)
@@ -326,7 +326,7 @@ def test_runner_never_raises_when_everything_fails(monkeypatch, mocker):
 
     from src.research.sessions import create_session
     s = create_session(rep_id="U", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     # Must not raise

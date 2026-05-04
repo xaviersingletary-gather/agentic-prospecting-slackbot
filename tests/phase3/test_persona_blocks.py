@@ -28,7 +28,7 @@ def test_persona_options_have_correct_values():
         e for e in actions[0]["elements"] if e.get("type") == "checkboxes"
     )
     values = {opt["value"] for opt in checkboxes["options"]}
-    assert values == {"csco", "vp_warehouse_ops", "vp_inventory_planning", "sop_lead"}
+    assert values == {"technical_lead", "operations_lead", "executive", "compliance_lead"}
 
 
 def test_persona_option_labels_match_spec():
@@ -40,10 +40,10 @@ def test_persona_option_labels_match_spec():
         e for e in actions[0]["elements"] if e.get("type") == "checkboxes"
     )
     labels_by_value = {opt["value"]: opt["text"]["text"] for opt in checkboxes["options"]}
-    assert "Chief Supply Chain" in labels_by_value["csco"]
-    assert "Warehouse" in labels_by_value["vp_warehouse_ops"]
-    assert "Inventory" in labels_by_value["vp_inventory_planning"]
-    assert "S&OP" in labels_by_value["sop_lead"]
+    assert "Technical Lead" in labels_by_value["technical_lead"]
+    assert "Operations Lead" in labels_by_value["operations_lead"]
+    assert "Executive" in labels_by_value["executive"]
+    assert "Compliance Lead" in labels_by_value["compliance_lead"]
 
 
 def test_blocks_contain_run_research_button_with_session_id():

@@ -20,7 +20,7 @@ def test_placeholder_findings_carry_session_account_name():
     from src.research.sessions import create_session
 
     s = create_session(rep_id="U_REP", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops"]
+    s.personas = ["operations_lead"]
 
     findings = build_placeholder_findings(s)
     assert findings["account_name"] == "Kroger"
@@ -40,11 +40,11 @@ def test_placeholder_findings_record_personas_in_research_gaps():
     from src.research.sessions import create_session
 
     s = create_session(rep_id="U_REP", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops", "csco"]
+    s.personas = ["operations_lead", "executive"]
 
     gaps_text = " ".join(build_placeholder_findings(s)["research_gaps"]).lower()
-    assert "vp_warehouse_ops" in gaps_text or "warehouse" in gaps_text
-    assert "csco" in gaps_text
+    assert "operations_lead" in gaps_text or "warehouse" in gaps_text
+    assert "executive" in gaps_text
 
 
 def test_run_research_posts_blocks_via_respond():
@@ -52,7 +52,7 @@ def test_run_research_posts_blocks_via_respond():
     from src.research.sessions import create_session
 
     s = create_session(rep_id="U_REP", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops"]
+    s.personas = ["operations_lead"]
     respond = MagicMock()
 
     run_research(s, respond)
@@ -122,7 +122,7 @@ def test_handler_invokes_kickoff_research_on_happy_path(mocker):
                     "persona_checkboxes": {
                         "type": "checkboxes",
                         "selected_options": [
-                            {"value": "csco",
+                            {"value": "executive",
                              "text": {"type": "plain_text", "text": "x"}},
                         ],
                     }

@@ -17,7 +17,7 @@ def test_log_usage_appends_one_jsonl_entry_per_call(tmp_log):
         "slack_user_id": "U1",
         "slack_user_name": "rep_one",
         "account_queried": "Kroger",
-        "personas_selected": ["vp_warehouse_ops"],
+        "personas_selected": ["operations_lead"],
         "apis_called": ["exa", "apollo"],
         "apollo_credits_used": 5,
         "exa_calls": 3,

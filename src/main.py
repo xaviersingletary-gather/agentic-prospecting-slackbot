@@ -119,23 +119,16 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
 
 
 # ---------------------------------------------------------------------------
-# Account Research Bot v1 — slash commands + persona-select action
-# (added by feat/phase-1-railway; runs alongside the legacy DM flow below.)
+# Account Research Bot v1 — natural-language DM entry point + run_research action
+#
+# No slash commands. Any DM is treated as a research request: account name is
+# extracted, a session is created, and the rep gets a 4-checkbox persona card.
+# Clicking "Run Research" fires the V1 pipeline (HubSpot snapshot + Exa +
+# OpenRouter findings + Apollo contacts).
 # ---------------------------------------------------------------------------
 
-from src.handlers.research_command import handle_research_command as _v1_research_cmd
-from src.handlers.about import handle_about_command as _v1_about_cmd
+from src.handlers.dm_research import handle_research_dm as _v1_handle_dm
 from src.handlers.persona_select import handle_run_research_action as _v1_run_research_action
-
-
-@app.command("/research")
-def _v1_cmd_research(ack, respond, command):
-    _v1_research_cmd(command=command, ack=ack, respond=respond)
-
-
-@app.command("/about")
-def _v1_cmd_about(ack, respond, command):
-    _v1_about_cmd(payload=command, ack=ack, respond=respond)
 
 
 @app.action("run_research")
@@ -143,90 +136,9 @@ def _v1_action_run_research(ack, body, respond):
     _v1_run_research_action(payload=body, ack=ack, respond=respond)
 
 
-# ---------------------------------------------------------------------------
-# Legacy prototype — DM-based prospecting flow. Untouched.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Phase 1 — Message intake + confirmation card
-# ---------------------------------------------------------------------------
-
 @app.message()
-def handle_message(message, say, client):
-    user_id = message.get("user")
-    channel_id = message.get("channel")
-    text = message.get("text", "").strip()
-
-    if not text or message.get("bot_id") or text.strip().lower() == "clear":
-        return
-
-    rep_role = get_rep_role(user_id)
-    session_id = str(uuid.uuid4())
-
-    logger.info(f"New prospecting request from {user_id}: {text[:80]}")
-
-    request = RepRequest(
-        raw_message=text,
-        rep_id=user_id,
-        rep_role=rep_role,
-        channel_id=channel_id,
-        timestamp=datetime.utcnow().isoformat(),
-    )
-    normalized = normalizer.normalize(request)
-
-    logger.info(f"[handle_message] persisting session {session_id}")
-    try:
-        with get_session() as db:
-            session = Session(
-                id=session_id,
-                account_name=normalized.account_name,
-                account_domain=normalized.account_domain,
-                rep_id=user_id,
-                rep_role=rep_role,
-                channel_id=channel_id,
-                phase=1,
-                phase_label="confirmation",
-                status="active",
-                normalized_request=normalized.to_dict(),
-            )
-            db.add(session)
-            db.commit()
-            logger.info(f"[handle_message] session committed OK")
-    except Exception as e:
-        logger.error(f"Failed to persist session: {e}")
-
-    logger.info(f"[handle_message] logging session_started event")
-    log_event(session_id, "session_started", 1, user_id, {"raw_message": text})
-    logger.info(f"[handle_message] event logged")
-
-    # Light warning if other threads are still in progress (non-blocking)
-    try:
-        with get_session() as db:
-            in_progress = (
-                db.query(Session)
-                .filter(Session.rep_id == user_id, Session.status == "active", Session.id != session_id)
-                .count()
-            )
-            if in_progress:
-                say(text=f"_Heads up: you have {in_progress} other thread(s) in progress. Scroll up to find them._")
-    except Exception:
-        pass
-
-    logger.info(f"[handle_message] posting confirmation card for session {session_id}")
-    try:
-        blocks = confirmation_card(
-            account_name=normalized.account_name,
-            persona_filter=normalized.persona_filter,
-            use_case_angle=normalized.use_case_angle,
-            session_id=session_id,
-        )
-        resp = say(
-            blocks=blocks,
-            text=f"Got it. Here's what I'll run for {normalized.account_name}.",
-        )
-        logger.info(f"[handle_message] say() returned: ok={resp.get('ok')} ts={resp.get('ts')}")
-    except Exception as _say_err:
-        logger.error(f"[handle_message] say() failed: {_say_err}", exc_info=True)
+def handle_message(message, say):
+    _v1_handle_dm(message=message, say=say)
 
 
 # ---------------------------------------------------------------------------

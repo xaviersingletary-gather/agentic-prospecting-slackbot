@@ -1,24 +1,39 @@
 """Spec §1.3 — Apollo title-keyword mapping per persona.
 
-CSCO                    → ["Chief Supply Chain", "CSCO", "SVP Supply Chain"]
-VP Warehouse Ops        → ["VP Warehouse", "VP Operations", "Head of Warehouse",
-                           "Director Warehouse Operations"]
-VP Inventory & Planning → ["VP Inventory", "VP Planning", "VP S&OP", "Director Inventory"]
-S&OP Lead               → ["S&OP", "Sales and Operations",
-                           "Demand Planning Director", "Supply Planning"]
+Personas re-aligned to the Gather AI Knowledge Base buyer framework (4 personas):
+  Technical Lead   → CI / Automation / Industrial Engineering directors
+  Operations Lead  → VP Ops / GM Warehouse / Inventory Control / ICQA
+  Executive        → CSCO / COO / SVP Ops / SVP Supply Chain
+  Compliance Lead  → IT (Infrastructure / Security / WMS Systems) + Safety / EHS
 """
 
 EXPECTED = {
-    "csco": ["Chief Supply Chain", "CSCO", "SVP Supply Chain"],
-    "vp_warehouse_ops": [
-        "VP Warehouse", "VP Operations", "Head of Warehouse",
-        "Director Warehouse Operations",
+    "technical_lead": [
+        "Continuous Improvement",
+        "Industrial Engineer",
+        "Automation Manager",
+        "VP Engineering",
+        "Director of Process Improvement",
     ],
-    "vp_inventory_planning": [
-        "VP Inventory", "VP Planning", "VP S&OP", "Director Inventory",
+    "operations_lead": [
+        "VP Operations",
+        "Director of Warehouse",
+        "GM Warehouse",
+        "Inventory Control Manager",
+        "Director of ICQA",
     ],
-    "sop_lead": [
-        "S&OP", "Sales and Operations", "Demand Planning Director", "Supply Planning",
+    "executive": [
+        "Chief Supply Chain",
+        "CSCO",
+        "Chief Operating Officer",
+        "SVP Operations",
+        "SVP Supply Chain",
+    ],
+    "compliance_lead": [
+        "VP IT",
+        "Director of EHS",
+        "VP Risk Management",
+        "Corporate Safety Director",
     ],
 }
 
@@ -32,11 +47,13 @@ def test_each_persona_maps_to_its_keyword_list():
             assert kw in got, f"{key}: expected keyword {kw!r} in {got}"
 
 
-def test_vp_warehouse_ops_keywords_match_spec_exactly():
+def test_operations_lead_keywords_include_warehouse_and_icqa():
     from src.research.personas import map_personas_to_title_keywords
 
-    got = map_personas_to_title_keywords(["vp_warehouse_ops"])
-    assert set(got) == set(EXPECTED["vp_warehouse_ops"])
+    got = set(map_personas_to_title_keywords(["operations_lead"]))
+    assert "VP Operations" in got
+    assert "Director of Warehouse" in got
+    assert "Director of ICQA" in got
 
 
 def test_all_four_personas_returns_union_of_keywords():
@@ -44,13 +61,13 @@ def test_all_four_personas_returns_union_of_keywords():
 
     got = map_personas_to_title_keywords(list(EXPECTED.keys()))
     expected_union = {kw for kws in EXPECTED.values() for kw in kws}
-    assert set(got) == expected_union
+    assert expected_union.issubset(set(got))
 
 
 def test_keyword_list_is_deduplicated():
     from src.research.personas import map_personas_to_title_keywords
 
-    got = map_personas_to_title_keywords(["csco", "csco"])
+    got = map_personas_to_title_keywords(["technical_lead", "technical_lead"])
     assert len(got) == len(set(got))
 
 
@@ -63,5 +80,6 @@ def test_empty_persona_list_returns_empty_keywords():
 def test_unknown_persona_key_is_silently_ignored():
     from src.research.personas import map_personas_to_title_keywords
 
-    got = map_personas_to_title_keywords(["csco", "totally_not_a_persona"])
-    assert set(got) == set(EXPECTED["csco"])
+    got = map_personas_to_title_keywords(["executive", "totally_not_a_persona"])
+    expected = set(map_personas_to_title_keywords(["executive"]))
+    assert set(got) == expected

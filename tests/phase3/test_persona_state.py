@@ -51,12 +51,12 @@ def test_update_personas_persists_selection():
     from src.research.sessions import create_session, get_session, update_personas
 
     s = create_session(rep_id="U1", account_name="Kroger")
-    update_personas(s.session_id, ["csco", "vp_warehouse_ops"])
+    update_personas(s.session_id, ["executive", "operations_lead"])
     fetched = get_session(s.session_id)
-    assert fetched.personas == ["csco", "vp_warehouse_ops"]
+    assert fetched.personas == ["executive", "operations_lead"]
 
 
 def test_update_personas_on_unknown_session_returns_none():
     from src.research.sessions import update_personas
 
-    assert update_personas("missing", ["csco"]) is None
+    assert update_personas("missing", ["executive"]) is None

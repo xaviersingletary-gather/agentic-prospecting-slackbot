@@ -62,7 +62,7 @@ def test_run_research_still_posts_blocks(mocker):
     _mock_exa_and_llm(mocker)
 
     s = create_session(rep_id="U1", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     run_research(s, respond)
@@ -82,7 +82,7 @@ def test_run_research_account_name_in_blocks(mocker):
     _mock_exa_and_llm(mocker)
 
     s = create_session(rep_id="U1", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     run_research(s, respond)
@@ -118,7 +118,7 @@ def test_run_research_does_not_raise_when_llm_fails(mocker):
     )
 
     s = create_session(rep_id="U1", account_name="Kroger")
-    s.personas = ["csco"]
+    s.personas = ["executive"]
     respond = MagicMock()
 
     run_research(s, respond)
@@ -134,7 +134,7 @@ def test_build_placeholder_findings_still_callable_for_back_compat(mocker):
     _mock_exa_and_llm(mocker)
 
     s = create_session(rep_id="U1", account_name="Kroger")
-    s.personas = ["vp_warehouse_ops", "csco"]
+    s.personas = ["operations_lead", "executive"]
     findings = build_placeholder_findings(s)
 
     assert findings["account_name"] == "Kroger"

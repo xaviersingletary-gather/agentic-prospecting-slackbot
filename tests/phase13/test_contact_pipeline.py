@@ -13,7 +13,7 @@ def _session(rep_id="U_REP", account="Kroger", personas=None):
     from src.research.sessions import create_session
 
     s = create_session(rep_id=rep_id, account_name=account)
-    s.personas = personas or ["vp_warehouse_ops"]
+    s.personas = personas or ["operations_lead"]
     return s
 
 
@@ -63,7 +63,7 @@ def test_apollo_called_with_persona_keywords(mocker):
     apollo.search_contacts_by_company_and_titles.return_value = []
     hs = MagicMock()
 
-    s = _session(personas=["vp_warehouse_ops"])
+    s = _session(personas=["operations_lead"])
     build_tagged_contacts(
         s, apollo_client=apollo, hubspot_contact_client=hs, portal_id="12345"
     )

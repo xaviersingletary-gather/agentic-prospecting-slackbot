@@ -103,7 +103,7 @@ def test_findings_dict_matches_v1_schema(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["vp_warehouse_ops"],
+        personas=["operations_lead"],
     )
     findings = build_findings(s)
 
@@ -132,7 +132,7 @@ def test_account_name_flows_to_exa_queries(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Sysco Foods",
-        personas=["csco"],
+        personas=["executive"],
     )
     build_findings(s)
 
@@ -151,7 +151,7 @@ def test_personas_influence_anthropic_prompt(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["vp_warehouse_ops", "csco"],
+        personas=["operations_lead", "executive"],
     )
     build_findings(s)
 
@@ -164,8 +164,8 @@ def test_personas_influence_anthropic_prompt(mocker):
         for m in messages
         if m.get("role") == "user"
     ).lower()
-    assert "warehouse" in user_text or "vp_warehouse_ops" in user_text
-    assert "csco" in user_text or "supply chain" in user_text
+    assert "warehouse" in user_text or "operations_lead" in user_text
+    assert "executive" in user_text or "supply chain" in user_text
 
 
 def test_empty_exa_results_produce_empty_sections_with_research_gap(mocker):
@@ -184,7 +184,7 @@ def test_empty_exa_results_produce_empty_sections_with_research_gap(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="ObscureCo",
-        personas=["csco"],
+        personas=["executive"],
     )
     findings = build_findings(s)
 
@@ -207,7 +207,7 @@ def test_bad_claude_json_falls_back_gracefully(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["csco"],
+        personas=["executive"],
     )
     findings = build_findings(s)
 
@@ -228,7 +228,7 @@ def test_claude_json_in_fenced_code_block_is_parsed(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["csco"],
+        personas=["executive"],
     )
     findings = build_findings(s)
     assert len(findings["trigger_events"]) >= 1

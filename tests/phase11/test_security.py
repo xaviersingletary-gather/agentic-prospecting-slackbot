@@ -65,7 +65,7 @@ def test_llm_system_prompt_contains_citation_requirement(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["csco"],
+        personas=["executive"],
     )
     build_findings(s)
 
@@ -95,7 +95,7 @@ def test_exa_snippets_land_in_user_message_not_system(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["csco"],
+        personas=["executive"],
     )
     build_findings(s)
 
@@ -133,7 +133,7 @@ def test_prompt_injection_in_exa_snippet_does_not_escalate(mocker):
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
-        personas=["csco"],
+        personas=["executive"],
     )
     # Must not raise
     findings = build_findings(s)

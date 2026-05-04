@@ -83,7 +83,7 @@ def test_handler_refuses_to_mutate_when_user_is_not_session_owner():
     s = create_session(rep_id="U_REP_A", account_name="Kroger")
     # User B clicks the button on user A's session
     payload = _payload_for_run_button(
-        s.session_id, user_id="U_REP_B", selected=["csco"],
+        s.session_id, user_id="U_REP_B", selected=["executive"],
     )
 
     ack = MagicMock()
@@ -107,7 +107,7 @@ def test_handler_does_not_call_research_pipeline_when_unauthorized(mocker):
 
     s = create_session(rep_id="U_REP_A", account_name="Kroger")
     payload = _payload_for_run_button(
-        s.session_id, user_id="U_REP_B", selected=["csco"],
+        s.session_id, user_id="U_REP_B", selected=["executive"],
     )
 
     # Patch the module-level sentinel that any future research kickoff would

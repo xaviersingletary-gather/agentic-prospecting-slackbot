@@ -77,14 +77,14 @@ def test_one_persona_selected_persists_to_session():
     s = create_session(rep_id="U_REP", account_name="Kroger")
     payload = _payload_for_run_button(
         s.session_id, user_id="U_REP",
-        selected_persona_values=["vp_warehouse_ops"],
+        selected_persona_values=["operations_lead"],
     )
 
     ack = MagicMock()
     respond = MagicMock()
     handle_run_research_action(payload=payload, ack=ack, respond=respond)
 
-    assert get_session(s.session_id).personas == ["vp_warehouse_ops"]
+    assert get_session(s.session_id).personas == ["operations_lead"]
 
 
 
@@ -93,7 +93,7 @@ def test_all_four_personas_persist_to_session():
     from src.handlers.persona_select import handle_run_research_action
 
     s = create_session(rep_id="U_REP", account_name="Kroger")
-    all_four = ["csco", "vp_warehouse_ops", "vp_inventory_planning", "sop_lead"]
+    all_four = ["technical_lead", "operations_lead", "executive", "compliance_lead"]
     payload = _payload_for_run_button(
         s.session_id, user_id="U_REP", selected_persona_values=all_four,
     )
@@ -110,7 +110,7 @@ def test_unknown_session_id_responds_gracefully():
     from src.handlers.persona_select import handle_run_research_action
 
     payload = _payload_for_run_button("does-not-exist", user_id="U_REP",
-                                      selected_persona_values=["csco"])
+                                      selected_persona_values=["executive"])
 
     ack = MagicMock()
     respond = MagicMock()
