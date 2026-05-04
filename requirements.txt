@@ -1,4 +1,4 @@
-anthropic==0.86.0
+openai==1.61.0
 cryptography==46.0.5
 slack-bolt==1.27.0
 slack-sdk==3.41.0

@@ -10,13 +10,10 @@ class Settings:
     # App version — read by /about command
     VERSION: str = VERSION
 
-    # LLM — Claude Agents SDK
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-
-    # LLM via OpenRouter (legacy prototype — kept for backward compat)
+    # LLM — OpenRouter (OpenAI-compatible) is the single LLM provider.
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
 
     # Slack
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")

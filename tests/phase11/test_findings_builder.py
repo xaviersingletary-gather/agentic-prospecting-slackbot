@@ -1,23 +1,23 @@
 """Phase 11 — Findings builder.
 
 Orchestrator: account name + selected personas → findings dict in the
-v1 schema. Calls Exa for snippets, hands them to Claude with a system
-prompt that requires `[Source: URL]` on every claim, and parses Claude's
-JSON output back into the schema.
+v1 schema. Calls Exa for snippets, hands them to the LLM (OpenRouter,
+OpenAI-compatible) with a system prompt that requires `[Source: URL]`
+on every claim, and parses the JSON output back into the schema.
 
-External calls (Exa, Anthropic) are mocked.
+External calls (Exa, OpenRouter) are mocked.
 """
 import json
 from unittest.mock import MagicMock
 
 
-def _claude_response(text: str):
-    """Build a minimal anthropic.Messages.create() return value."""
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
+def _llm_response(text: str):
+    """Build a minimal openai.chat.completions.create() return value."""
+    choice = MagicMock()
+    choice.message = MagicMock()
+    choice.message.content = text
     resp = MagicMock()
-    resp.content = [block]
+    resp.choices = [choice]
     return resp
 
 
@@ -78,22 +78,20 @@ def _patch_exa(mocker, results=None):
     return mock_client
 
 
-def _patch_anthropic(mocker, text):
-    mock_anthropic = MagicMock()
-    mock_messages = MagicMock()
-    mock_messages.create.return_value = _claude_response(text)
-    mock_anthropic.messages = mock_messages
+def _patch_openrouter(mocker, text):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _llm_response(text)
     mocker.patch(
-        "src.research.findings_builder.Anthropic",
-        return_value=mock_anthropic,
+        "src.research.findings_builder.OpenAI",
+        return_value=mock_client,
     )
-    # Settings may not have ANTHROPIC_API_KEY at test time; force it on
-    # so the builder doesn't bail out before calling Anthropic.
+    # Settings may not have OPENROUTER_API_KEY at test time; force it on
+    # so the builder doesn't bail out before calling the LLM.
     mocker.patch(
-        "src.research.findings_builder.settings.ANTHROPIC_API_KEY",
-        "test-anthropic-key",
+        "src.research.findings_builder.settings.OPENROUTER_API_KEY",
+        "test-openrouter-key",
     )
-    return mock_anthropic
+    return mock_client
 
 
 def test_findings_dict_matches_v1_schema(mocker):
@@ -101,7 +99,7 @@ def test_findings_dict_matches_v1_schema(mocker):
     from src.research.sessions import ResearchSession
 
     _patch_exa(mocker)
-    _patch_anthropic(mocker, _good_claude_json())
+    _patch_openrouter(mocker, _good_claude_json())
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
@@ -130,7 +128,7 @@ def test_account_name_flows_to_exa_queries(mocker):
     from src.research.sessions import ResearchSession
 
     exa = _patch_exa(mocker)
-    _patch_anthropic(mocker, _good_claude_json())
+    _patch_openrouter(mocker, _good_claude_json())
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Sysco Foods",
@@ -149,7 +147,7 @@ def test_personas_influence_anthropic_prompt(mocker):
     from src.research.sessions import ResearchSession
 
     _patch_exa(mocker)
-    anthropic_client = _patch_anthropic(mocker, _good_claude_json())
+    llm_client = _patch_openrouter(mocker, _good_claude_json())
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
@@ -157,13 +155,14 @@ def test_personas_influence_anthropic_prompt(mocker):
     )
     build_findings(s)
 
-    # Inspect the messages.create call — persona labels should be in the user message
-    create_kwargs = anthropic_client.messages.create.call_args.kwargs
+    # Inspect the chat.completions.create call — persona labels should be in the user message
+    create_kwargs = llm_client.chat.completions.create.call_args.kwargs
     messages = create_kwargs.get("messages", [])
     user_text = " ".join(
         m.get("content", "") if isinstance(m.get("content"), str)
         else json.dumps(m.get("content", ""))
         for m in messages
+        if m.get("role") == "user"
     ).lower()
     assert "warehouse" in user_text or "vp_warehouse_ops" in user_text
     assert "csco" in user_text or "supply chain" in user_text
@@ -175,7 +174,7 @@ def test_empty_exa_results_produce_empty_sections_with_research_gap(mocker):
 
     _patch_exa(mocker, results=[])
     # Even if Anthropic is called, returns nothing
-    _patch_anthropic(mocker, json.dumps({
+    _patch_openrouter(mocker, json.dumps({
         "trigger_events": [],
         "competitor_signals": [],
         "dc_intel": [],
@@ -204,7 +203,7 @@ def test_bad_claude_json_falls_back_gracefully(mocker):
     from src.research.sessions import ResearchSession
 
     _patch_exa(mocker)
-    _patch_anthropic(mocker, "this is not JSON {{{")
+    _patch_openrouter(mocker, "this is not JSON {{{")
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",
@@ -225,7 +224,7 @@ def test_claude_json_in_fenced_code_block_is_parsed(mocker):
 
     _patch_exa(mocker)
     fenced = "Here you go:\n```json\n" + _good_claude_json() + "\n```\nDone."
-    _patch_anthropic(mocker, fenced)
+    _patch_openrouter(mocker, fenced)
 
     s = ResearchSession(
         session_id="s1", rep_id="U1", account_name="Kroger",

@@ -3,14 +3,16 @@
 Pipeline:
   account name + selected personas
     → 4 scoped Exa searches (triggers, competitors, DC intel, board)
-    → snippets handed to Claude as untrusted user content
-    → Claude returns JSON matching the v1 schema
+    → snippets handed to the LLM as untrusted user content
+    → LLM returns JSON matching the v1 schema
     → parsed and returned as the findings dict
 
+LLM provider: OpenRouter (OpenAI-compatible API).
+
 Security posture:
-- Untrusted Exa snippets land in the Anthropic *user* message, never
+- Untrusted Exa snippets land in the LLM *user* message, never
   the system prompt (CLAUDE.md → LLM prompt-injection blast radius).
-- Anthropic call is text-in / text-out — no tools wired. Even a
+- LLM call is text-in / text-out — no tools wired. Even a
   prompt-injected snippet has nothing to escalate to.
 - Every result URL has already been through `assert_safe_url` inside
   `ExaSearchClient`; we re-assert defensively before using URLs in the
@@ -27,7 +29,7 @@ import os
 import re
 from typing import Any, Dict, List, Tuple
 
-from anthropic import Anthropic
+from openai import OpenAI
 
 from src.config import settings
 from src.integrations.exa.client import ExaSearchClient
@@ -37,7 +39,7 @@ from src.security.url_guard import BlockedUrlError, assert_safe_url
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 MAX_TOKENS = 2000
 EXA_NUM_RESULTS = 10
 
@@ -147,20 +149,20 @@ def build_findings(session: ResearchSession) -> Dict[str, Any]:
             ],
         )
 
-    # 2. Anthropic extraction. Skip cleanly if no API key configured.
-    if not settings.ANTHROPIC_API_KEY:
+    # 2. LLM extraction (OpenRouter). Skip cleanly if no API key configured.
+    if not settings.OPENROUTER_API_KEY:
         return _empty_findings(
             account_name,
             extra_gaps=base_gaps + [
-                "ANTHROPIC_API_KEY not configured; skipping extraction step. "
+                "OPENROUTER_API_KEY not configured; skipping extraction step. "
                 f"Exa returned {total_snippets} snippets — see logs."
             ],
         )
 
     try:
-        raw_text = _call_anthropic(account_name, personas, snippets_by_topic)
+        raw_text = _call_openrouter(account_name, personas, snippets_by_topic)
     except Exception as e:
-        logger.error("[findings_builder] Anthropic call failed: %s", type(e).__name__)
+        logger.error("[findings_builder] OpenRouter call failed: %s", type(e).__name__)
         return _empty_findings(
             account_name,
             extra_gaps=base_gaps + [
@@ -232,31 +234,38 @@ def _run_exa_searches(
     return snippets_by_topic, all_failed
 
 
-def _call_anthropic(
+def _call_openrouter(
     account_name: str,
     personas: List[str],
     snippets_by_topic: Dict[str, List[Dict[str, Any]]],
 ) -> str:
-    """Build the Anthropic call. No tools. Snippets in user message."""
-    model = os.getenv("ACCOUNT_RESEARCH_MODEL", DEFAULT_MODEL)
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    """Call OpenRouter (OpenAI-compatible). No tools. Snippets in user message."""
+    model = (
+        os.getenv("ACCOUNT_RESEARCH_MODEL")
+        or settings.OPENROUTER_MODEL
+        or DEFAULT_MODEL
+    )
+    client = OpenAI(
+        api_key=settings.OPENROUTER_API_KEY,
+        base_url=settings.OPENROUTER_BASE_URL,
+    )
 
     user_content = _build_user_message(account_name, personas, snippets_by_topic)
 
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=model,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
     )
-    # Extract concatenated text from response.content blocks
-    parts: List[str] = []
-    for block in getattr(response, "content", []) or []:
-        # Each block is .type == "text" with .text
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts).strip()
+    choices = getattr(response, "choices", []) or []
+    if not choices:
+        return ""
+    msg = getattr(choices[0], "message", None)
+    content = getattr(msg, "content", None) if msg else None
+    return (content or "").strip()
 
 
 def _build_user_message(

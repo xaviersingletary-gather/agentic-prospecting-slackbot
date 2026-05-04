@@ -4,7 +4,7 @@ import pytest
 REQUIRED_VARS = [
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
-    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
     "APOLLO_API_KEY",
     "EXA_API_KEY",
 ]
@@ -54,7 +54,7 @@ def test_validate_lists_only_missing_vars(monkeypatch):
     assert "APOLLO_API_KEY" in msg
     assert "EXA_API_KEY" in msg
     assert "SLACK_BOT_TOKEN" not in msg
-    assert "ANTHROPIC_API_KEY" not in msg
+    assert "OPENROUTER_API_KEY" not in msg
 
 
 def test_validate_treats_empty_string_as_missing(monkeypatch):

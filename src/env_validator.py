@@ -5,7 +5,7 @@ from typing import Iterable, List, Optional
 REQUIRED_ENV_VARS: List[str] = [
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
-    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
     "APOLLO_API_KEY",
     "EXA_API_KEY",
 ]

@@ -67,7 +67,7 @@ def test_boot_validation_runs_before_heavy_imports(monkeypatch):
     for var in [
         "SLACK_BOT_TOKEN",
         "SLACK_APP_TOKEN",
-        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
         "APOLLO_API_KEY",
         "EXA_API_KEY",
     ]:

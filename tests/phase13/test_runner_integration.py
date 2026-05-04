@@ -4,8 +4,8 @@ The smoke test of the whole "drop env vars in Railway and it works"
 contract: the runner must call respond exactly once for every combination
 of env vars present/missing, and never raise.
 
-External clients (Anthropic, Exa, Apollo, HubSpot) are mocked at module
-boundaries so no test ever hits the network.
+External clients (OpenRouter LLM, Exa, Apollo, HubSpot) are mocked at
+module boundaries so no test ever hits the network.
 """
 import json
 from unittest.mock import MagicMock
@@ -28,13 +28,13 @@ def _isolate_env(monkeypatch):
     monkeypatch.delenv("APOLLO_API_KEY", raising=False)
     monkeypatch.delenv("HUBSPOT_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("HUBSPOT_PORTAL_ID", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     from src.config import settings
     monkeypatch.setattr(settings, "APOLLO_API_KEY", "", raising=False)
     monkeypatch.setattr(settings, "HUBSPOT_ACCESS_TOKEN", "", raising=False)
     monkeypatch.setattr(settings, "HUBSPOT_PORTAL_ID", "", raising=False)
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "", raising=False)
     monkeypatch.setattr(settings, "EXA_API_KEY", "", raising=False)
     yield
 
@@ -53,15 +53,15 @@ def _set(monkeypatch, **kwargs):
         monkeypatch.setattr(settings, k, v, raising=False)
 
 
-def _mock_findings_pipeline(mocker, exa_results=None, anthropic_payload=None):
-    """Mock the existing Phase 11 Exa+Anthropic stack."""
+def _mock_findings_pipeline(mocker, exa_results=None, llm_payload=None):
+    """Mock the Phase 11 Exa+OpenRouter stack."""
     if exa_results is None:
         exa_results = [
             {"title": "Kroger DC", "url": "https://example.com/k",
              "snippet": "Kroger expands"},
         ]
-    if anthropic_payload is None:
-        anthropic_payload = {
+    if llm_payload is None:
+        llm_payload = {
             "trigger_events": [{"claim": "Kroger expands DC",
                                  "source_url": "https://example.com/k"}],
             "competitor_signals": [],
@@ -75,15 +75,15 @@ def _mock_findings_pipeline(mocker, exa_results=None, anthropic_payload=None):
     mocker.patch("src.research.findings_builder.ExaSearchClient",
                  return_value=mock_exa)
 
-    block = MagicMock()
-    block.type = "text"
-    block.text = json.dumps(anthropic_payload)
+    choice = MagicMock()
+    choice.message = MagicMock()
+    choice.message.content = json.dumps(llm_payload)
     resp = MagicMock()
-    resp.content = [block]
-    mock_anthropic = MagicMock()
-    mock_anthropic.messages.create.return_value = resp
-    mocker.patch("src.research.findings_builder.Anthropic",
-                 return_value=mock_anthropic)
+    resp.choices = [choice]
+    mock_llm = MagicMock()
+    mock_llm.chat.completions.create.return_value = resp
+    mocker.patch("src.research.findings_builder.OpenAI",
+                 return_value=mock_llm)
 
 
 def _mock_apollo_client(mocker, contacts=None):
@@ -122,7 +122,7 @@ def _mock_hubspot_account_client(mocker, company=None):
 
 def test_all_envs_set_renders_snapshot_research_and_contacts(monkeypatch, mocker):
     _set(monkeypatch, APOLLO_API_KEY="ak", HUBSPOT_ACCESS_TOKEN="hs",
-         HUBSPOT_PORTAL_ID="12345", ANTHROPIC_API_KEY="an", EXA_API_KEY="ex")
+         HUBSPOT_PORTAL_ID="12345", OPENROUTER_API_KEY="or", EXA_API_KEY="ex")
 
     runner = _reload_config_and_factory()
     _mock_findings_pipeline(mocker)
@@ -156,7 +156,7 @@ def test_all_envs_set_renders_snapshot_research_and_contacts(monkeypatch, mocker
 
 def test_apollo_missing_no_contacts_warning_visible(monkeypatch, mocker):
     _set(monkeypatch, HUBSPOT_ACCESS_TOKEN="hs", HUBSPOT_PORTAL_ID="12345",
-         ANTHROPIC_API_KEY="an", EXA_API_KEY="ex")
+         OPENROUTER_API_KEY="or", EXA_API_KEY="ex")
 
     runner = _reload_config_and_factory()
     _mock_findings_pipeline(mocker)
@@ -180,7 +180,7 @@ def test_apollo_missing_no_contacts_warning_visible(monkeypatch, mocker):
 # ---------------------------------------------------------------------------
 
 def test_hubspot_missing_contacts_untagged_snapshot_omitted(monkeypatch, mocker):
-    _set(monkeypatch, APOLLO_API_KEY="ak", ANTHROPIC_API_KEY="an",
+    _set(monkeypatch, APOLLO_API_KEY="ak", OPENROUTER_API_KEY="or",
          EXA_API_KEY="ex")
 
     runner = _reload_config_and_factory()
@@ -207,13 +207,13 @@ def test_hubspot_missing_contacts_untagged_snapshot_omitted(monkeypatch, mocker)
 # 4. Anthropic missing → empty findings + research_gap (Phase 11 behaviour)
 # ---------------------------------------------------------------------------
 
-def test_anthropic_missing_empty_findings_with_gap(monkeypatch, mocker):
+def test_openrouter_missing_empty_findings_with_gap(monkeypatch, mocker):
     _set(monkeypatch, APOLLO_API_KEY="ak", HUBSPOT_ACCESS_TOKEN="hs",
          HUBSPOT_PORTAL_ID="12345", EXA_API_KEY="ex")
 
     runner = _reload_config_and_factory()
     # Exa still returns results; Anthropic key missing means findings_builder
-    # short-circuits with the "ANTHROPIC_API_KEY not configured" gap.
+    # short-circuits with the "OPENROUTER_API_KEY not configured" gap.
     mock_exa = MagicMock()
     mock_exa.search.return_value = [
         {"title": "x", "url": "https://example.com/", "snippet": "y"},
@@ -233,7 +233,7 @@ def test_anthropic_missing_empty_findings_with_gap(monkeypatch, mocker):
     respond.assert_called_once()
     rendered = json.dumps(respond.call_args.kwargs.get("blocks"))
     # Research gaps section is rendered with the Anthropic-missing gap
-    assert "ANTHROPIC_API_KEY" in rendered or "extraction" in rendered.lower()
+    assert "OPENROUTER_API_KEY" in rendered or "extraction" in rendered.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ def test_anthropic_missing_empty_findings_with_gap(monkeypatch, mocker):
 
 def test_exa_missing_runner_still_responds(monkeypatch, mocker):
     _set(monkeypatch, APOLLO_API_KEY="ak", HUBSPOT_ACCESS_TOKEN="hs",
-         HUBSPOT_PORTAL_ID="12345", ANTHROPIC_API_KEY="an")
+         HUBSPOT_PORTAL_ID="12345", OPENROUTER_API_KEY="or")
 
     runner = _reload_config_and_factory()
     # Exa raises because the key is missing — findings_builder handles it
@@ -301,7 +301,7 @@ def test_zero_envs_set_runner_still_responds_with_headers(monkeypatch, mocker):
 
 def test_runner_never_raises_when_everything_fails(monkeypatch, mocker):
     _set(monkeypatch, APOLLO_API_KEY="ak", HUBSPOT_ACCESS_TOKEN="hs",
-         HUBSPOT_PORTAL_ID="12345", ANTHROPIC_API_KEY="an", EXA_API_KEY="ex")
+         HUBSPOT_PORTAL_ID="12345", OPENROUTER_API_KEY="or", EXA_API_KEY="ex")
 
     runner = _reload_config_and_factory()
     mocker.patch(
