@@ -2,66 +2,47 @@
 
 Personas re-aligned to the Gather AI Knowledge Base buyer framework (4 personas):
   Technical Lead   → CI / Automation / Industrial Engineering directors
-  Operations Lead  → VP Ops / GM Warehouse / Inventory Control / ICQA
+  Operations Lead  → VP Ops / Director of Warehouse / Inventory Control
   Executive        → CSCO / COO / SVP Ops / SVP Supply Chain
-  Compliance Lead  → IT (Infrastructure / Security / WMS Systems) + Safety / EHS
+  Compliance Lead  → IT + Safety / EHS
+
+Title keyword lists are intentionally tight (≤6 each) to keep Apollo's
+`person_titles` filter under its 422 threshold. Tests assert that the
+*highest-priority* keyword from each persona is present rather than
+pinning the full list — the list will continue to be tuned over time.
 """
 
-EXPECTED = {
-    "technical_lead": [
-        "Continuous Improvement",
-        "Industrial Engineer",
-        "Automation Manager",
-        "VP Engineering",
-        "Director of Process Improvement",
-    ],
-    "operations_lead": [
-        "VP Operations",
-        "Director of Warehouse",
-        "GM Warehouse",
-        "Inventory Control Manager",
-        "Director of ICQA",
-    ],
-    "executive": [
-        "Chief Supply Chain",
-        "CSCO",
-        "Chief Operating Officer",
-        "SVP Operations",
-        "SVP Supply Chain",
-    ],
-    "compliance_lead": [
-        "VP IT",
-        "Director of EHS",
-        "VP Risk Management",
-        "Corporate Safety Director",
-    ],
+# One must-have keyword per persona — the title most likely to actually
+# book a first meeting.
+PRIORITY_KEYWORD = {
+    "technical_lead": "Director of Continuous Improvement",
+    "operations_lead": "VP Operations",
+    "executive": "Chief Supply Chain Officer",
+    "compliance_lead": "Director of IT",
 }
 
 
-def test_each_persona_maps_to_its_keyword_list():
+def test_each_persona_has_priority_keyword():
     from src.research.personas import map_personas_to_title_keywords
 
-    for key, expected in EXPECTED.items():
+    for key, expected in PRIORITY_KEYWORD.items():
         got = map_personas_to_title_keywords([key])
-        for kw in expected:
-            assert kw in got, f"{key}: expected keyword {kw!r} in {got}"
+        assert expected in got, f"{key}: expected {expected!r} in {got}"
 
 
-def test_operations_lead_keywords_include_warehouse_and_icqa():
-    from src.research.personas import map_personas_to_title_keywords
+def test_persona_keyword_lists_stay_under_apollo_limit():
+    """Apollo `person_titles` returns 422 once the array gets long.
+    Cap each persona at 6 keywords; cap the union at 24."""
+    from src.research.personas import PERSONAS, map_personas_to_title_keywords
 
-    got = set(map_personas_to_title_keywords(["operations_lead"]))
-    assert "VP Operations" in got
-    assert "Director of Warehouse" in got
-    assert "Director of ICQA" in got
+    for key, cfg in PERSONAS.items():
+        assert len(cfg["title_keywords"]) <= 6, (
+            f"{key} has {len(cfg['title_keywords'])} keywords; Apollo "
+            f"won't accept lists this long"
+        )
 
-
-def test_all_four_personas_returns_union_of_keywords():
-    from src.research.personas import map_personas_to_title_keywords
-
-    got = map_personas_to_title_keywords(list(EXPECTED.keys()))
-    expected_union = {kw for kws in EXPECTED.values() for kw in kws}
-    assert expected_union.issubset(set(got))
+    union = map_personas_to_title_keywords(list(PERSONAS.keys()))
+    assert len(union) <= 24, f"union of all personas: {len(union)} keywords"
 
 
 def test_keyword_list_is_deduplicated():

@@ -50,7 +50,7 @@ from src.security.url_guard import BlockedUrlError, assert_safe_url
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
-MAX_TOKENS = 2000
+MAX_TOKENS = 4000
 EXA_NUM_RESULTS = 10
 
 # Spec §1.4 — exact line that must appear in the system prompt.
@@ -202,6 +202,14 @@ def build_findings(
     # 3. Parse + sanitize
     parsed = _parse_claude_json(raw_text)
     if parsed is None:
+        # Log a short sample so we can diagnose what the model returned.
+        # Not a credential surface — this is LLM output, not API tokens.
+        sample = (raw_text or "")[:400].replace("\n", " ")
+        logger.error(
+            "[findings_builder] JSON parse failed; raw_len=%d sample=%r",
+            len(raw_text or ""),
+            sample,
+        )
         return _empty_findings(
             account_name,
             extra_gaps=base_gaps + [
@@ -283,14 +291,36 @@ def _call_openrouter(
 
     user_content = _build_user_message(account_name, personas, snippets_by_topic)
 
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=MAX_TOKENS,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    )
+    # `response_format=json_object` forces compatible models (Claude 4.x,
+    # GPT-4o, etc.) to emit a single valid JSON object — eliminates the
+    # "model wrapped JSON in prose" parse failures we were seeing on
+    # large accounts where Exa returns a lot of context.
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=MAX_TOKENS,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        )
+    except Exception as e:
+        # Some OpenRouter-routed models reject `response_format`. Retry
+        # once without it; the regex parser handles fenced output.
+        logger.warning(
+            "[findings_builder] response_format=json_object rejected (%s); "
+            "retrying without",
+            type(e).__name__,
+        )
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        )
     choices = getattr(response, "choices", []) or []
     if not choices:
         return ""

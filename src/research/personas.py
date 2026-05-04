@@ -9,7 +9,10 @@ Aligned to the Gather AI Knowledge Base buyer-persona framework:
      #1 closed-lost gap when missed.
   4. Compliance Lead — IT + Safety/EHS gatekeepers. Surface late = deal risk.
 
-Keys are stable identifiers used in Slack action values and session state.
+Title keyword lists are kept tight (≤6 each) — Apollo's `person_titles`
+filter degrades to 422 Unprocessable Entity when the array gets long,
+and tighter filters return higher-fit contacts anyway. Keys are stable
+identifiers used in Slack action values and session state.
 """
 from typing import Dict, Iterable, List, TypedDict
 
@@ -23,76 +26,42 @@ PERSONAS: Dict[str, PersonaConfig] = {
     "technical_lead": {
         "label": "Technical Lead — CI / Automation / Engineering",
         "title_keywords": [
-            "Continuous Improvement",
             "Director of Continuous Improvement",
-            "Director of CI",
-            "Industrial Engineer",
-            "Industrial Engineering",
-            "Automation Engineering",
-            "Automation Manager",
+            "Director of Industrial Engineering",
             "Director of Automation",
             "VP Engineering",
-            "VP of Engineering",
-            "VP of Logistics Technology",
-            "Manufacturing Technology",
-            "Process Improvement",
-            "Innovation Engineer",
-            "Head of Engineering",
-            "Director of Industrial Engineering",
-            "Director of Process Improvement",
+            "Industrial Engineer",
+            "Continuous Improvement Manager",
         ],
     },
     "operations_lead": {
         "label": "Operations Lead — Warehouse / DC / Inventory Ops",
         "title_keywords": [
             "VP Operations",
-            "VP of Operations",
             "Director of Operations",
-            "VP Warehouse",
-            "VP of Warehouse",
             "Director of Warehouse",
             "Director of Distribution",
-            "GM Warehouse",
-            "Head of Warehouse",
-            "Director of Inventory",
-            "Director of Supply Chain",
-            "Director of ICQA",
-            "Inventory Control Manager",
-            "ICQA Manager",
-            "Sr. Manager DC Operations",
-            "VP Fulfillment",
-            "VP of Fulfillment",
+            "Director of Inventory Control",
             "Director of Fulfillment",
         ],
     },
     "executive": {
         "label": "Executive — CSCO / COO / SVP Ops",
         "title_keywords": [
-            "Chief Supply Chain",
-            "CSCO",
+            "Chief Supply Chain Officer",
             "Chief Operating Officer",
-            "COO",
-            "EVP Operations",
             "SVP Operations",
-            "EVP Supply Chain",
             "SVP Supply Chain",
-            "Head of Network Operations",
+            "EVP Operations",
         ],
     },
     "compliance_lead": {
         "label": "Compliance Lead — IT / Safety / EHS",
         "title_keywords": [
-            "Director of Infrastructure",
-            "VP of Information Technology",
-            "VP IT",
             "Director of IT",
-            "Director of Enterprise Architecture",
-            "WMS Systems",
+            "VP Information Technology",
             "Director of EHS",
-            "VP Risk Management",
-            "VP Health Safety",
-            "Director of Operations Risk",
-            "Corporate Safety Director",
+            "VP Safety",
             "Director of Loss Prevention",
         ],
     },
