@@ -71,7 +71,12 @@ def test_tag_contacts_does_not_leak_token_in_logs_or_return(caplog):
 
 def test_hubspot_strings_pass_through_safe_mrkdwn():
     """When HubSpot returns a poisoned firstname, the rendered Slack output
-    must not contain `<`, `>`, or `|` characters."""
+    must not contain `<`, `>`, or `|` characters originating from
+    attacker-controlled fields. The renderer is allowed to emit Slack
+    link syntax for our own validated HubSpot record URL and Apollo
+    LinkedIn URL — display text for those is constant, not user input
+    — so we strip those known-safe patterns before checking."""
+    import re
     from src.integrations.hubspot.contact_check import render_contact_for_slack
 
     poisoned_contact = {
@@ -84,11 +89,15 @@ def test_hubspot_strings_pass_through_safe_mrkdwn():
         "hubspot_url": "https://app.hubspot.com/contacts/123/contact/456",
     }
     rendered = render_contact_for_slack(poisoned_contact)
-    assert "<" not in rendered
-    assert ">" not in rendered
-    assert "|" not in rendered
+    # Strip our own validated `<url|LinkedIn>` and `<url|HubSpot>` link
+    # patterns — display text is a known-safe constant.
+    safe_link_re = re.compile(r"<https?://[^>|\s]+\|(LinkedIn|HubSpot)>")
+    stripped = safe_link_re.sub("", rendered)
+    assert "<" not in stripped
+    assert ">" not in stripped
+    assert "|" not in stripped
     # The ampersand from "K&Co" is also stripped by safe_mrkdwn
-    assert "&" not in rendered
+    assert "&" not in stripped
 
 
 # -----------------------------

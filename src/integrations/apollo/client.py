@@ -120,18 +120,40 @@ class ApolloContactClient:
 
 def _normalize_person(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten an Apollo person record into the contact dict shape the
-    Phase 7 tagger / Slack renderer consume."""
+    Phase 7 tagger / Slack renderer consume.
+
+    Apollo returns names split into `first_name` / `last_name` plus a
+    combined `name`. We fall back to `name` when the split fields come
+    back empty (happens for some org-search results). LinkedIn URL is
+    pulled from `linkedin_url` and surfaced separately so the renderer
+    can show a clickable link.
+
+    Email is surfaced verbatim — Apollo's free/limited-credit tier
+    returns the literal placeholder `email_not_unlocked@domain.com`,
+    which the renderer detects and hides rather than displaying as a
+    real address.
+    """
     organization = raw.get("organization") or {}
     company = (
         organization.get("name")
         if isinstance(organization, dict) else None
     ) or raw.get("organization_name") or ""
 
+    first = (raw.get("first_name") or "").strip()
+    last = (raw.get("last_name") or "").strip()
+    if not first and not last:
+        full = (raw.get("name") or "").strip()
+        if full:
+            parts = full.split(" ", 1)
+            first = parts[0]
+            last = parts[1] if len(parts) > 1 else ""
+
     return {
-        "first_name": raw.get("first_name") or "",
-        "last_name": raw.get("last_name") or "",
+        "first_name": first,
+        "last_name": last,
         "email": raw.get("email") or "",
         "title": raw.get("title") or "",
+        "linkedin_url": raw.get("linkedin_url") or "",
         "company": company,
         # Carry Apollo id forward in case downstream code wants it
         "apollo_id": raw.get("id"),

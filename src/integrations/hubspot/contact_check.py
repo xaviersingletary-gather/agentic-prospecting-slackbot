@@ -54,19 +54,46 @@ def render_contact_for_slack(contact: dict) -> str:
     """Render a tagged contact as a single Slack mrkdwn line.
 
     Every external string flows through `safe_mrkdwn` per S1.2.1b.
+    Empty fields are skipped so we never render `[NET NEW]   — VP @ Co ()`
+    with broken layout. LinkedIn URL renders as a clickable
+    `<url|LinkedIn>` link. Apollo's `email_not_unlocked@…` placeholder
+    is treated as no-email-available and hidden.
     """
-    first = safe_mrkdwn(contact.get("first_name", ""))
-    last = safe_mrkdwn(contact.get("last_name", ""))
-    title = safe_mrkdwn(contact.get("title", ""))
-    company = safe_mrkdwn(contact.get("company", ""))
-    email = safe_mrkdwn(contact.get("email", ""))
+    first = safe_mrkdwn(contact.get("first_name", "")).strip()
+    last = safe_mrkdwn(contact.get("last_name", "")).strip()
+    title = safe_mrkdwn(contact.get("title", "")).strip()
+    company = safe_mrkdwn(contact.get("company", "")).strip()
+    raw_email = (contact.get("email") or "").strip()
+    raw_linkedin = (contact.get("linkedin_url") or "").strip()
     status = contact.get("status", "")
-    line = f"[{status}] {first} {last} — {title} @ {company} ({email})"
+
+    # Apollo placeholder for emails the account doesn't have credits to
+    # unlock — show "email locked" instead of a fake address.
+    email_locked = "email_not_unlocked" in raw_email.lower()
+    has_email = bool(raw_email) and not email_locked
+    email = safe_mrkdwn(raw_email) if has_email else ""
+
+    name = (f"{first} {last}").strip() or "_(name unknown)_"
+    title_company = " @ ".join(p for p in [title, company] if p) or ""
+
+    parts = [f"*{name}*"]
+    if title_company:
+        parts.append(title_company)
+    if email:
+        parts.append(email)
+    elif email_locked:
+        parts.append("_email locked_")
+    if raw_linkedin and raw_linkedin.lower().startswith(("http://", "https://")):
+        # LinkedIn URLs are external user-controlled — strip Slack-link
+        # metacharacters before wrapping. Display text is a known-safe
+        # constant, not user input.
+        clean = raw_linkedin.replace(">", "").replace("|", "")
+        parts.append(f"<{clean}|LinkedIn>")
     if contact.get("hubspot_url"):
-        # The URL is built from sanitized IDs (portal + HubSpot contact id),
-        # not external strings; safe to render as-is.
-        line += f" — {contact['hubspot_url']}"
-    return line
+        parts.append(f"<{contact['hubspot_url']}|HubSpot>")
+
+    body = "  ·  ".join(parts)
+    return f"[{status}] {body}"
 
 
 def _lookup_one(client, contact: dict) -> Optional[dict]:
