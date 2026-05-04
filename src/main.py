@@ -132,8 +132,8 @@ from src.handlers.persona_select import handle_run_research_action as _v1_run_re
 
 
 @app.action("run_research")
-def _v1_action_run_research(ack, body, respond):
-    _v1_run_research_action(payload=body, ack=ack, respond=respond)
+def _v1_action_run_research(ack, body, respond, client):
+    _v1_run_research_action(payload=body, ack=ack, respond=respond, client=client)
 
 
 @app.action("persona_checkboxes")
@@ -145,8 +145,8 @@ def _v1_action_persona_checkboxes(ack):
 
 
 @app.message()
-def handle_message(message, say):
-    _v1_handle_dm(message=message, say=say)
+def handle_message(message, say, client):
+    _v1_handle_dm(message=message, say=say, client=client)
 
 
 # ---------------------------------------------------------------------------

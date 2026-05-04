@@ -57,13 +57,16 @@ def build_placeholder_findings(session: ResearchSession) -> Dict[str, Any]:
 def run_account_research(
     session: ResearchSession,
     post: Callable[..., Any],
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Build findings + HubSpot snapshot and post them.
+    """Build research findings (Exa + OpenRouter only) and post them.
 
     `post` is the Slack posting callable — `say` from the message handler
-    is the typical caller. Always invoked exactly once. Never raises.
+    is the typical caller. `on_progress`, if provided, is invoked with
+    short status strings as each pipeline stage runs. Always invoked
+    exactly once. Never raises.
     """
-    blocks = _build_account_blocks(session)
+    blocks = _build_account_blocks(session, on_progress=on_progress)
     try:
         post(
             blocks=blocks,
@@ -79,24 +82,29 @@ def run_account_research(
 
 def run_persona_research(
     session: ResearchSession,
-    respond: Callable[..., Any],
+    post: Callable[..., Any],
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Build Apollo+HubSpot tagged contacts for the selected personas.
+    """Build HubSpot snapshot + Apollo contacts (tagged against HubSpot)
+    for the selected personas, then post the result via `post`.
 
-    Posts as an ephemeral block_actions response that does NOT replace
-    the persona card — we want the rep to see both their selection AND
-    the resulting contacts.
+    `post` may be either:
+      - a Slack `respond()` callable (legacy / test path) — the runner
+        will pass `replace_original=False, response_type="ephemeral"`,
+      - or a generic `chat.postMessage`-style callable (production
+        threaded path) — the handler shapes the kwargs.
+
+    `on_progress`, if provided, is called with status strings as each
+    sub-step runs.
     """
-    blocks = _build_persona_blocks(session)
+    blocks = _build_persona_blocks(session, on_progress=on_progress)
     try:
-        respond(
-            response_type="ephemeral",
-            replace_original=False,
+        post(
             blocks=blocks,
             text=f"Contacts for {session.account_name}",
         )
     except Exception as e:  # noqa: BLE001
-        safe_log_exception(logger, e, "persona research respond() failed")
+        safe_log_exception(logger, e, "persona research post() failed")
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +134,26 @@ def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
 # Internal builders
 # ---------------------------------------------------------------------------
 
-def _build_account_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
+def _emit(on_progress: Optional[Callable[[str], None]], msg: str) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(msg)
+    except Exception:  # noqa: BLE001 — progress is best-effort
+        pass
+
+
+def _build_account_blocks(
+    session: ResearchSession,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
     """Pure-research blocks (Exa + OpenRouter findings).
 
     Intentionally does NOT call HubSpot — Stage 1 must keep working even
     if the HubSpot token is invalid. Snapshot moved to Stage 2.
     """
     try:
-        findings = build_findings(session)
+        findings = build_findings(session, on_progress=on_progress)
     except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, "build_findings raised unexpectedly")
         findings = {
@@ -149,7 +169,10 @@ def _build_account_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
     return build_research_blocks(findings)
 
 
-def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
+def _build_persona_blocks(
+    session: ResearchSession,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
     """Stage 2 blocks: HubSpot account snapshot + Apollo contacts tagged
     against HubSpot. Never raises."""
     apollo_client = _safe_call(get_apollo_client, "apollo client init")
@@ -161,6 +184,7 @@ def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
     )
     portal_id = _safe_call(get_hubspot_portal_id, "hubspot portal id read")
 
+    _emit(on_progress, "👥 Searching Apollo for contacts…")
     try:
         tag_result = build_tagged_contacts(
             session,
@@ -174,6 +198,7 @@ def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
 
     snapshot_blocks: List[Dict[str, Any]] = []
     if hs_account_client is not None and portal_id:
+        _emit(on_progress, "🏷️ Looking up account in HubSpot…")
         domain = resolve_domain(
             session.account_name, tag_result.get("contacts") or []
         )

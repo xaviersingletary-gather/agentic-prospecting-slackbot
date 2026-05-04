@@ -97,7 +97,7 @@ def test_kickoff_research_delegates_to_runner(mocker):
     respond = MagicMock()
 
     ps.kickoff_research(s, respond)
-    spy.assert_called_once_with(s, respond)
+    spy.assert_called_once_with(s, respond, on_progress=None)
 
 
 def test_handler_invokes_kickoff_research_on_happy_path(mocker):

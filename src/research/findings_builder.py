@@ -27,7 +27,17 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+ProgressCB = Optional[Callable[[str], None]]
+
+# Human-readable label for each topic — used in progress messages.
+_TOPIC_LABELS = {
+    "trigger_events": "trigger events",
+    "competitor_signals": "competitor signals",
+    "dc_intel": "distribution / facility intel",
+    "board_initiatives": "board initiatives",
+}
 
 from openai import OpenAI
 
@@ -109,16 +119,33 @@ _TOPIC_QUERIES: List[Tuple[str, str]] = [
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_findings(session: ResearchSession) -> Dict[str, Any]:
+def _emit(on_progress: ProgressCB, msg: str) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(msg)
+    except Exception:  # noqa: BLE001 — progress is best-effort
+        logger.debug("[findings_builder] on_progress callback raised; ignoring")
+
+
+def build_findings(
+    session: ResearchSession,
+    on_progress: ProgressCB = None,
+) -> Dict[str, Any]:
     """Run the real research pipeline. Never raises — failure modes
     surface as empty sections plus an explanatory research_gap.
+
+    `on_progress`, if provided, is called with a short human-readable
+    status string at each pipeline stage (Exa per-topic + LLM call).
     """
     account_name = session.account_name
     personas = list(session.personas or [])
     persona_labels = _persona_labels(personas)
 
     # 1. Exa searches (each one already returns SSRF-safe URLs)
-    snippets_by_topic, exa_failed = _run_exa_searches(account_name)
+    snippets_by_topic, exa_failed = _run_exa_searches(
+        account_name, on_progress=on_progress
+    )
     total_snippets = sum(len(v) for v in snippets_by_topic.values())
 
     # Always-on context line so the rep can see what we researched.
@@ -159,6 +186,7 @@ def build_findings(session: ResearchSession) -> Dict[str, Any]:
             ],
         )
 
+    _emit(on_progress, "🤖 Synthesizing findings…")
     try:
         raw_text = _call_openrouter(account_name, personas, snippets_by_topic)
     except Exception as e:
@@ -203,6 +231,7 @@ def _persona_labels(persona_keys: List[str]) -> List[str]:
 
 def _run_exa_searches(
     account_name: str,
+    on_progress: ProgressCB = None,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], bool]:
     """Run one Exa search per topic. Returns (snippets_by_topic, all_failed).
 
@@ -218,6 +247,8 @@ def _run_exa_searches(
     snippets_by_topic: Dict[str, List[Dict[str, Any]]] = {}
     fails = 0
     for topic, template in _TOPIC_QUERIES:
+        label = _TOPIC_LABELS.get(topic, topic)
+        _emit(on_progress, f"🔍 Searching {label}…")
         query = template.format(company=account_name)
         try:
             hits = client.search(query, num_results=EXA_NUM_RESULTS)

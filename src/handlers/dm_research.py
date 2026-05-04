@@ -69,12 +69,17 @@ def _extract_account_name(text: str) -> str:
 def handle_research_dm(
     message: Dict[str, Any],
     say: Callable[..., Any],
+    client: Any = None,
     ack: Optional[Callable[..., Any]] = None,
 ) -> None:
     """Bolt @app.message() handler. Treats every non-bot DM as a research request.
 
-    `ack` is included for symmetry with action handlers; @app.message() doesn't
-    require it but passing it through keeps the call-shape consistent for tests.
+    `client` is the Bolt-provided Slack WebClient — used to update the
+    progress status message inline via `chat.update`. When absent (test
+    path), progress updates degrade silently to no-ops.
+
+    `ack` is included for symmetry with action handlers; @app.message()
+    doesn't require it but keeps the call-shape consistent.
     """
     if ack is not None:
         try:
@@ -117,15 +122,56 @@ def handle_research_dm(
 
     session = create_session(rep_id=user_id, account_name=account_name)
 
-    # Stage 0 — immediate placeholder so the DM doesn't look dead while
-    # Exa + OpenRouter run (~10-15s).
-    say(text=f":mag: Researching *{account_name}*…")
+    # Thread everything off the user's DM. `message.ts` is the original
+    # message timestamp; all bot replies use it as `thread_ts` so they
+    # collapse under the user's prompt instead of cluttering the channel.
+    thread_ts = message.get("ts")
+    channel = message.get("channel")
 
-    # Stage 1 — account research (findings + HubSpot snapshot).
-    run_account_research(session, say)
+    def threaded_say(**kwargs: Any) -> Any:
+        kwargs.setdefault("thread_ts", thread_ts)
+        return say(**kwargs)
+
+    # Stage 0 — live status message in the thread. `update_status`
+    # rewrites this same message at each pipeline stage (Searching X →
+    # Synthesizing → Done). If chat.update fails we just stop updating
+    # — the static placeholder is still better than nothing.
+    status_text = f":mag: *Researching {account_name}…*\n_Starting up_"
+    status_resp = threaded_say(text=status_text)
+    status_ts = (status_resp or {}).get("ts") if isinstance(status_resp, dict) else None
+    if status_ts is None:
+        # SlackResponse object with attribute access
+        status_ts = getattr(status_resp, "data", {}).get("ts") if status_resp else None
+
+    def update_status(line: str) -> None:
+        if client is None or status_ts is None or channel is None:
+            return
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=status_ts,
+                text=f":mag: *Researching {account_name}…*\n_{line}_",
+            )
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            pass
+
+    # Stage 1 — pure research (Exa + OpenRouter). HubSpot stays in Stage 2.
+    run_account_research(session, threaded_say, on_progress=update_status)
+
+    # Final state on the status message — stays visible in the thread as
+    # a "✓ Done" marker so the rep can scan back to it later.
+    if client is not None and status_ts is not None and channel is not None:
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=status_ts,
+                text=f":white_check_mark: *Research complete for {account_name}*",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # Stage 2 prep — persona-checkbox card. Click triggers run_persona_research.
-    say(
+    threaded_say(
         blocks=build_persona_select_blocks(
             account_name=account_name,
             session_id=session.session_id,
