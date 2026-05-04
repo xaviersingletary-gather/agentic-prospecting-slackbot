@@ -127,12 +127,11 @@ def run_research(session: ResearchSession, respond: Callable[..., Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _build_account_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
-    """Findings + HubSpot snapshot blocks. Never raises."""
-    hs_account_client = _safe_call(
-        get_hubspot_account_client, "hubspot account client init"
-    )
-    portal_id = _safe_call(get_hubspot_portal_id, "hubspot portal id read")
+    """Pure-research blocks (Exa + OpenRouter findings).
 
+    Intentionally does NOT call HubSpot — Stage 1 must keep working even
+    if the HubSpot token is invalid. Snapshot moved to Stage 2.
+    """
     try:
         findings = build_findings(session)
     except Exception as e:  # noqa: BLE001
@@ -147,30 +146,18 @@ def _build_account_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
                 f"Research extraction failed; {type(e).__name__}.",
             ],
         }
-
-    snapshot_blocks: List[Dict[str, Any]] = []
-    if hs_account_client is not None and portal_id:
-        domain = resolve_domain(session.account_name, [])
-        try:
-            snap = get_account_snapshot(
-                hs_account_client, session.account_name, domain, portal_id
-            )
-        except Exception as e:  # noqa: BLE001
-            safe_log_exception(logger, e, "account snapshot lookup raised")
-            snap = None
-        snapshot_blocks = (
-            build_account_snapshot_blocks(snap) if snap is not None
-            else build_account_not_found_blocks(session.account_name)
-        )
-
-    return snapshot_blocks + build_research_blocks(findings)
+    return build_research_blocks(findings)
 
 
 def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
-    """Apollo+HubSpot tagged contact blocks. Never raises."""
+    """Stage 2 blocks: HubSpot account snapshot + Apollo contacts tagged
+    against HubSpot. Never raises."""
     apollo_client = _safe_call(get_apollo_client, "apollo client init")
     hs_contact_client = _safe_call(
         get_hubspot_contact_client, "hubspot contact client init"
+    )
+    hs_account_client = _safe_call(
+        get_hubspot_account_client, "hubspot account client init"
     )
     portal_id = _safe_call(get_hubspot_portal_id, "hubspot portal id read")
 
@@ -185,7 +172,24 @@ def _build_persona_blocks(session: ResearchSession) -> List[Dict[str, Any]]:
         safe_log_exception(logger, e, "build_tagged_contacts raised")
         tag_result = {"contacts": [], "warning": "Contact pipeline failed"}
 
-    return build_contact_blocks(tag_result)
+    snapshot_blocks: List[Dict[str, Any]] = []
+    if hs_account_client is not None and portal_id:
+        domain = resolve_domain(
+            session.account_name, tag_result.get("contacts") or []
+        )
+        try:
+            snap = get_account_snapshot(
+                hs_account_client, session.account_name, domain, portal_id
+            )
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "account snapshot lookup raised")
+            snap = None
+        snapshot_blocks = (
+            build_account_snapshot_blocks(snap) if snap is not None
+            else build_account_not_found_blocks(session.account_name)
+        )
+
+    return snapshot_blocks + build_contact_blocks(tag_result)
 
 
 def _safe_call(fn: Callable[[], Any], label: str) -> Optional[Any]:
