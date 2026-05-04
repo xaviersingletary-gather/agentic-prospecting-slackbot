@@ -53,8 +53,12 @@ def test_search_sends_company_and_titles_in_payload():
         path = args[0] if args else kwargs.get("path", "")
         payload = args[1] if len(args) > 1 else kwargs.get("payload", {})
 
-        assert "/v1/mixed_people/search" in path or "mixed_people/search" in path
-        assert payload.get("q_organization_name") == "Kroger"
+        # The legacy-aligned endpoint Apollo actually accepts; the
+        # documented `/v1/mixed_people/search` returns 422.
+        assert "/mixed_people/api_search" in path
+        # Without an explicit `domain`, the company name flows into
+        # `q_keywords` (free-text org-name match).
+        assert payload.get("q_keywords") == "Kroger"
         assert "VP Warehouse" in payload.get("person_titles", [])
         assert "Head of Warehouse" in payload.get("person_titles", [])
         # Result list normalized

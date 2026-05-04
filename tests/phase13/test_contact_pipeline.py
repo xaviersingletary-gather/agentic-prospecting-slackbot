@@ -73,10 +73,9 @@ def test_apollo_called_with_persona_keywords(mocker):
     company = args[0] if args else kwargs.get("company_name")
     keywords = args[1] if len(args) > 1 else kwargs.get("title_keywords")
     assert company == "Kroger"
-    # Persona maps to: VP Warehouse, VP Operations, Head of Warehouse,
-    # Director Warehouse Operations
-    assert "VP Warehouse" in keywords
-    assert "Head of Warehouse" in keywords
+    # Operations Lead maps to ops/warehouse/distribution/inventory titles.
+    assert "VP Operations" in keywords
+    assert "Director of Warehouse" in keywords
 
 
 def test_apollo_ok_hubspot_none_returns_untagged_contacts_with_warning(mocker):

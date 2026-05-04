@@ -28,8 +28,12 @@ from src.security.exception_logger import safe_log_exception
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://api.apollo.io"
-SEARCH_PATH = "/v1/mixed_people/search"
+# Match the endpoint shape the legacy (working) prototype client used —
+# Apollo's documented `/v1/mixed_people/search` returns 422 for our
+# request shapes; `/api/v1/mixed_people/api_search` accepts the same
+# filters the legacy client was sending in production.
+BASE_URL = "https://api.apollo.io/api/v1"
+SEARCH_PATH = "/mixed_people/api_search"
 
 
 class ApolloContactClient:
@@ -64,9 +68,15 @@ class ApolloContactClient:
         title_keywords: List[str],
         *,
         limit: int = 25,
+        domain: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search Apollo for people at `company_name` whose titles match
         any of `title_keywords`.
+
+        When `domain` is supplied (e.g. `kroger.com`), filter by exact
+        org domain via `q_organization_domains_list` — most accurate.
+        Otherwise fall back to free-text `q_keywords` matching against
+        the company name; Apollo treats that as an org-name search.
 
         Returns a list of contact dicts shaped for the Phase 7
         `tag_contacts` pipeline:
@@ -77,16 +87,28 @@ class ApolloContactClient:
         if not company_name or not title_keywords:
             return []
 
-        payload = {
-            "q_organization_name": company_name,
+        payload: Dict[str, Any] = {
             "person_titles": list(title_keywords),
             "page": 1,
             "per_page": int(limit),
         }
+        if domain:
+            payload["q_organization_domains_list"] = [domain]
+        else:
+            payload["q_keywords"] = company_name
 
         try:
             response = self._post(SEARCH_PATH, payload)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Surface Apollo's actual error message in logs — without
+                # this we're flying blind on 422s. Body is small (~200
+                # chars) and contains no credentials.
+                body_preview = (response.text or "")[:300]
+                logger.error(
+                    "[apollo] %s on %s — body=%r",
+                    response.status_code, SEARCH_PATH, body_preview,
+                )
+                response.raise_for_status()
             body = response.json() or {}
         except Exception as e:  # noqa: BLE001 — graceful fallback
             safe_log_exception(logger, e, "apollo people search failed")
