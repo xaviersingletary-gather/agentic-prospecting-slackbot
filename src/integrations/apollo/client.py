@@ -20,11 +20,33 @@ Security gates
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from src.security.exception_logger import safe_log_exception
+
+
+def _derive_domain(company_name: str) -> str:
+    """Best-guess domain from a company name. Mirrors the legacy
+    prototype's resolver — drops common legal/structural suffixes,
+    lowercases, strips non-alphanumeric, appends `.com`.
+
+    Examples: "John Deere" → "johndeere.com",
+              "CEVA Logistics" → "cevalogistics.com",
+              "AbbVie Inc" → "abbvie.com"
+    """
+    name = re.sub(
+        r"\b(inc|llc|corp|co|ltd|limited|incorporated|group|holdings|enterprises|company)\b",
+        "",
+        company_name,
+        flags=re.IGNORECASE,
+    )
+    name = re.sub(r"[^a-z0-9]", "", name.lower())
+    if not name:
+        return company_name.lower().replace(" ", "") + ".com"
+    return f"{name}.com"
 
 logger = logging.getLogger(__name__)
 
@@ -73,49 +95,86 @@ class ApolloContactClient:
         """Search Apollo for people at `company_name` whose titles match
         any of `title_keywords`.
 
-        When `domain` is supplied (e.g. `kroger.com`), filter by exact
-        org domain via `q_organization_domains_list` — most accurate.
-        Otherwise fall back to free-text `q_keywords` matching against
-        the company name; Apollo treats that as an org-name search.
+        Strategy (matches the legacy prototype that has been working):
+        1. Resolve a domain — caller-provided or derived from the
+           company name — and search via `q_organization_domains_list`.
+           Domain-based is the only Apollo filter that reliably returns
+           hits for org-name searches; `q_keywords` is flaky.
+        2. If the domain search returns 0 people (wrong guess, e.g.
+           "AbbVie" → `abbvie.com` is right but "Sysco Foods" → wrong),
+           retry once with `q_keywords` as a fallback.
 
         Returns a list of contact dicts shaped for the Phase 7
         `tag_contacts` pipeline:
-            {first_name, last_name, email, company, title}
+            {first_name, last_name, email, title, linkedin_url, company}
 
         Failure modes (any) → [] + safe-logged exception. Never raises.
         """
         if not company_name or not title_keywords:
             return []
 
+        resolved_domain = domain or _derive_domain(company_name)
+        people = self._search(
+            company_name,
+            title_keywords,
+            limit,
+            filter_kind="domain",
+            filter_value=resolved_domain,
+        )
+        if not people:
+            logger.info(
+                "[apollo] domain search for %r (domain=%s) returned 0; "
+                "retrying with q_keywords",
+                company_name, resolved_domain,
+            )
+            people = self._search(
+                company_name,
+                title_keywords,
+                limit,
+                filter_kind="keywords",
+                filter_value=company_name,
+            )
+
+        logger.info(
+            "[apollo] %r → %d contacts surfaced",
+            company_name, len(people),
+        )
+        return [_normalize_person(p) for p in people]
+
+    def _search(
+        self,
+        company_name: str,
+        title_keywords: List[str],
+        limit: int,
+        *,
+        filter_kind: str,
+        filter_value: str,
+    ) -> List[Dict[str, Any]]:
+        """Single Apollo search call. Returns the raw `people` list."""
         payload: Dict[str, Any] = {
             "person_titles": list(title_keywords),
             "page": 1,
             "per_page": int(limit),
         }
-        if domain:
-            payload["q_organization_domains_list"] = [domain]
+        if filter_kind == "domain":
+            payload["q_organization_domains_list"] = [filter_value]
         else:
-            payload["q_keywords"] = company_name
+            payload["q_keywords"] = filter_value
 
         try:
             response = self._post(SEARCH_PATH, payload)
             if response.status_code >= 400:
-                # Surface Apollo's actual error message in logs — without
-                # this we're flying blind on 422s. Body is small (~200
-                # chars) and contains no credentials.
                 body_preview = (response.text or "")[:300]
                 logger.error(
-                    "[apollo] %s on %s — body=%r",
-                    response.status_code, SEARCH_PATH, body_preview,
+                    "[apollo] %s on %s (filter=%s) — body=%r",
+                    response.status_code, SEARCH_PATH, filter_kind, body_preview,
                 )
                 response.raise_for_status()
             body = response.json() or {}
         except Exception as e:  # noqa: BLE001 — graceful fallback
             safe_log_exception(logger, e, "apollo people search failed")
             return []
-
-        people = body.get("people") or []
-        return [_normalize_person(p) for p in people]
+        return body.get("people") or []
 
 
 def _normalize_person(raw: Dict[str, Any]) -> Dict[str, Any]:

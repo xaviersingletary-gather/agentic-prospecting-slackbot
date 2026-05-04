@@ -56,9 +56,11 @@ def test_search_sends_company_and_titles_in_payload():
         # The legacy-aligned endpoint Apollo actually accepts; the
         # documented `/v1/mixed_people/search` returns 422.
         assert "/mixed_people/api_search" in path
-        # Without an explicit `domain`, the company name flows into
-        # `q_keywords` (free-text org-name match).
-        assert payload.get("q_keywords") == "Kroger"
+        # Without an explicit `domain`, the client derives one from the
+        # company name and searches by `q_organization_domains_list`.
+        # The keyword fallback only kicks in when the domain search
+        # returns zero results.
+        assert payload.get("q_organization_domains_list") == ["kroger.com"]
         assert "VP Warehouse" in payload.get("person_titles", [])
         assert "Head of Warehouse" in payload.get("person_titles", [])
         # Result list normalized
