@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from src.research.angle_blocks import build_angle_blocks
+from src.research.angle_builder import build_angles
 from src.research.clients_factory import (
     get_apollo_client,
     get_hubspot_account_client,
@@ -34,7 +36,7 @@ from src.research.contact_pipeline import build_tagged_contacts
 from src.research.domain_resolver import resolve_domain
 from src.research.findings_builder import build_findings
 from src.research.output_formatter import build_research_blocks
-from src.research.sessions import ResearchSession
+from src.research.sessions import ResearchSession, set_findings
 from src.security.exception_logger import safe_log_exception
 from src.integrations.hubspot.account_snapshot import (
     build_account_not_found_blocks,
@@ -151,6 +153,9 @@ def _build_account_blocks(
 
     Intentionally does NOT call HubSpot — Stage 1 must keep working even
     if the HubSpot token is invalid. Snapshot moved to Stage 2.
+
+    Side effect: cache the findings on the session so Stage 2's angle
+    builder can ground its output without re-running Exa+OpenRouter.
     """
     try:
         findings = build_findings(session, on_progress=on_progress)
@@ -166,6 +171,15 @@ def _build_account_blocks(
                 f"Research extraction failed; {type(e).__name__}.",
             ],
         }
+    # Best-effort cache; tolerate test sessions whose IDs aren't in the
+    # in-memory store.
+    try:
+        set_findings(session.session_id, findings)
+    except Exception:  # noqa: BLE001
+        pass
+    # Also stash on the dataclass directly so callers holding the
+    # session reference (e.g. tests, legacy run_research) can read it.
+    session.findings = findings
     return build_research_blocks(findings)
 
 
@@ -173,8 +187,8 @@ def _build_persona_blocks(
     session: ResearchSession,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """Stage 2 blocks: HubSpot account snapshot + Apollo contacts tagged
-    against HubSpot. Never raises."""
+    """Stage 2 blocks: HubSpot account snapshot + reach-out angle card +
+    Apollo contacts tagged against HubSpot. Never raises."""
     apollo_client = _safe_call(get_apollo_client, "apollo client init")
     hs_contact_client = _safe_call(
         get_hubspot_contact_client, "hubspot contact client init"
@@ -197,6 +211,7 @@ def _build_persona_blocks(
         tag_result = {"contacts": [], "warning": "Contact pipeline failed"}
 
     snapshot_blocks: List[Dict[str, Any]] = []
+    snap = None
     if hs_account_client is not None and portal_id:
         _emit(on_progress, "🏷️ Looking up account in HubSpot…")
         domain = resolve_domain(
@@ -214,7 +229,29 @@ def _build_persona_blocks(
             else build_account_not_found_blocks(session.account_name)
         )
 
-    return snapshot_blocks + build_contact_blocks(tag_result)
+    # Reach-out angles — synthesizes findings + snapshot + contacts.
+    # Empty-result safe; never raises.
+    angle_blocks: List[Dict[str, Any]] = []
+    findings = session.findings or {}
+    if findings:
+        _emit(on_progress, "🎯 Building reach-out angles…")
+        try:
+            angles = build_angles(
+                findings=findings,
+                snapshot=snap,
+                tag_result=tag_result,
+                persona_keys=list(session.personas or []),
+            )
+            angle_blocks = build_angle_blocks(angles, tag_result)
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "build_angles raised")
+            angle_blocks = []
+
+    return (
+        snapshot_blocks
+        + angle_blocks
+        + build_contact_blocks(tag_result)
+    )
 
 
 def _safe_call(fn: Callable[[], Any], label: str) -> Optional[Any]:

@@ -6,7 +6,7 @@ for V1. V2 moves this to Redis.
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -16,6 +16,9 @@ class ResearchSession:
     account_name: str
     personas: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    # Cache of Stage 1 findings so Stage 2 (angle builder) can ground its
+    # output without re-running Exa/OpenRouter. None until Stage 1 finishes.
+    findings: Optional[Dict[str, Any]] = None
 
 
 _SESSIONS: Dict[str, ResearchSession] = {}
@@ -38,6 +41,12 @@ def update_personas(session_id: str, personas: List[str]) -> Optional[ResearchSe
         return None
     sess.personas = list(personas)
     return sess
+
+
+def set_findings(session_id: str, findings: Dict[str, Any]) -> None:
+    sess = _SESSIONS.get(session_id)
+    if sess is not None:
+        sess.findings = findings
 
 
 def _reset_for_tests() -> None:
