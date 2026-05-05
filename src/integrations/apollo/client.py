@@ -56,6 +56,10 @@ logger = logging.getLogger(__name__)
 # filters the legacy client was sending in production.
 BASE_URL = "https://api.apollo.io/api/v1"
 SEARCH_PATH = "/mixed_people/api_search"
+BULK_MATCH_PATH = "/people/bulk_match"
+
+# Apollo's bulk_match accepts up to 10 IDs per call.
+ENRICH_BATCH_SIZE = 10
 
 
 class ApolloContactClient:
@@ -139,7 +143,79 @@ class ApolloContactClient:
             "[apollo] %r → %d contacts surfaced",
             company_name, len(people),
         )
+        # Apollo's search returns redacted records — first name + title
+        # only on most accounts. Enrich via /people/bulk_match to unlock
+        # last_name, work email, and linkedin_url. One credit per match;
+        # failures are non-fatal (we still render whatever the search
+        # gave us).
+        if people:
+            people = self._enrich_people(people)
+
         return [_normalize_person(p) for p in people]
+
+    def _enrich_people(
+        self, people: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Call `/people/bulk_match` in batches of 10 and merge the
+        enriched fields (last_name, email, linkedin_url) back into the
+        search records by Apollo ID. Mutates the input list in place
+        and also returns it.
+
+        `reveal_personal_emails=False` keeps us on work emails only —
+        spec is B2B only.
+        """
+        enrichable = [p for p in people if p.get("id")]
+        if not enrichable:
+            return people
+
+        id_to_person = {p["id"]: p for p in enrichable}
+        total_emails = 0
+        total_linkedin = 0
+
+        for i in range(0, len(enrichable), ENRICH_BATCH_SIZE):
+            batch = enrichable[i : i + ENRICH_BATCH_SIZE]
+            payload = {
+                "details": [{"id": p["id"]} for p in batch],
+                "reveal_personal_emails": False,
+            }
+            try:
+                response = self._post(BULK_MATCH_PATH, payload)
+                if response.status_code >= 400:
+                    body_preview = (response.text or "")[:300]
+                    logger.error(
+                        "[apollo] bulk_match %s — body=%r",
+                        response.status_code, body_preview,
+                    )
+                    continue  # skip this batch; keep going on others
+                data = response.json() or {}
+            except Exception as e:  # noqa: BLE001
+                safe_log_exception(logger, e, "apollo bulk_match failed")
+                continue
+
+            matches = data.get("matches") or data.get("people") or []
+            for match in matches:
+                pid = match.get("id")
+                if not pid or pid not in id_to_person:
+                    continue
+                target = id_to_person[pid]
+                if match.get("last_name"):
+                    target["last_name"] = match["last_name"]
+                if match.get("first_name") and not target.get("first_name"):
+                    target["first_name"] = match["first_name"]
+                if match.get("linkedin_url"):
+                    target["linkedin_url"] = match["linkedin_url"]
+                    total_linkedin += 1
+                email = match.get("email") or match.get("work_email")
+                if email:
+                    target["email"] = email
+                    total_emails += 1
+
+        logger.info(
+            "[apollo] enrichment: %d/%d emails, %d/%d linkedin",
+            total_emails, len(enrichable),
+            total_linkedin, len(enrichable),
+        )
+        return people
 
     def _search(
         self,

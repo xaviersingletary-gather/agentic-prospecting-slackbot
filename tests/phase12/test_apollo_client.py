@@ -29,7 +29,7 @@ def test_search_sends_company_and_titles_in_payload():
     from src.integrations.apollo.client import ApolloContactClient
 
     client = ApolloContactClient(api_key="test-key")
-    body = {
+    search_body = {
         "people": [
             {
                 "id": "p1",
@@ -41,28 +41,42 @@ def test_search_sends_company_and_titles_in_payload():
             }
         ]
     }
-    with patch.object(
-        client, "_post", return_value=_mock_response(200, body)
-    ) as mock_post:
+    # The client now follows up `mixed_people/api_search` with
+    # `/people/bulk_match` to enrich last_name/email/linkedin. Returns
+    # an empty matches list to keep the test focused on search payload.
+    enrich_body = {"matches": []}
+
+    def _fake_post(path, payload):
+        if "bulk_match" in path:
+            return _mock_response(200, enrich_body)
+        return _mock_response(200, search_body)
+
+    with patch.object(client, "_post", side_effect=_fake_post) as mock_post:
         result = client.search_contacts_by_company_and_titles(
             "Kroger", ["VP Warehouse", "Head of Warehouse"]
         )
-        assert mock_post.call_count == 1
-        args, kwargs = mock_post.call_args
-        # Path is positional or via kwarg — handle both
+        # 1 search + 1 enrich call expected
+        assert mock_post.call_count == 2
+        # First call is the search — assert its shape
+        search_call = mock_post.call_args_list[0]
+        args, kwargs = search_call.args, search_call.kwargs
         path = args[0] if args else kwargs.get("path", "")
         payload = args[1] if len(args) > 1 else kwargs.get("payload", {})
 
-        # The legacy-aligned endpoint Apollo actually accepts; the
-        # documented `/v1/mixed_people/search` returns 422.
+        # Legacy-aligned endpoint; documented `/v1/mixed_people/search` 422s.
         assert "/mixed_people/api_search" in path
         # Without an explicit `domain`, the client derives one from the
         # company name and searches by `q_organization_domains_list`.
-        # The keyword fallback only kicks in when the domain search
-        # returns zero results.
+        # The keyword fallback only kicks in when domain search yields 0.
         assert payload.get("q_organization_domains_list") == ["kroger.com"]
         assert "VP Warehouse" in payload.get("person_titles", [])
         assert "Head of Warehouse" in payload.get("person_titles", [])
+        # Second call is the enrichment — assert it hit bulk_match
+        enrich_call = mock_post.call_args_list[1]
+        assert "bulk_match" in (
+            enrich_call.args[0] if enrich_call.args
+            else enrich_call.kwargs.get("path", "")
+        )
         # Result list normalized
         assert isinstance(result, list) and len(result) == 1
 
