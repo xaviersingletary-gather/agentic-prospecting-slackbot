@@ -48,17 +48,19 @@ def build_contact_blocks(tag_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         "text": {"type": "mrkdwn", "text": header_text},
     })
 
-    # Existing first (spec §1.2.1)
+    # Existing first (spec §1.2.1). Blank line between contacts for
+    # visual breathing room — each contact is a 2-line mini-row inside
+    # the same section block.
     if existing:
         capped, extra = _cap(existing, EXISTING_CAP)
         lines = [render_contact_for_slack(c) for c in capped]
         if extra:
-            lines.append(f"... and {extra} more")
+            lines.append(f"_…and {extra} more_")
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*EXISTS IN HUBSPOT*\n" + "\n".join(lines),
+                "text": "*✅ EXISTS IN HUBSPOT*\n\n" + "\n\n".join(lines),
             },
         })
 
@@ -67,12 +69,12 @@ def build_contact_blocks(tag_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         capped, extra = _cap(net_new, NET_NEW_CAP)
         lines = [render_contact_for_slack(c) for c in capped]
         if extra:
-            lines.append(f"... and {extra} more")
+            lines.append(f"_…and {extra} more_")
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*NET NEW*\n" + "\n".join(lines),
+                "text": "*🆕 NET NEW*\n\n" + "\n\n".join(lines),
             },
         })
 

@@ -31,7 +31,11 @@ from src.utils.citation_validator import (
 NO_DATA = "No public data found"
 DC_NO_DATA = "Could not confirm DC count from public sources"
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-MAX_CLAIMS_PER_SECTION = 6
+# Capped at 4 to keep total Block Kit count under Slack's 50-block hard
+# limit on a single message: each claim emits 2 blocks (section + context),
+# 4 sections × 4 claims × 2 = 32 blocks + 4 section headers + 1 main
+# header + 1 gaps section + 1 divider ≈ 39 blocks. Comfortable headroom.
+MAX_CLAIMS_PER_SECTION = 4
 
 _FACT_SECTIONS = [
     ("📌 TRIGGER EVENTS", "trigger_events"),
@@ -134,12 +138,118 @@ def format_research_output(findings: Dict[str, Any]) -> str:
     return "\n".join(sections).rstrip() + "\n"
 
 
-def build_research_blocks(findings: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """One header block + one section block per spec section, with
-    dividers between sections so the eye can find each topic fast.
+def _render_fact_card(
+    item: Dict[str, str], *, is_dc: bool
+) -> Optional[List[Dict[str, Any]]]:
+    """Per-claim Block Kit card.
 
-    Splitting by section keeps each text field well under Slack's 3000-char
-    mrkdwn limit even on accounts with long lists of findings.
+    Returns a list of 1 or 2 blocks (section + optional context), or
+    None when the claim must be dropped per spec §1.4 (unsourced DC
+    claim).
+
+    Layout:
+      • {claim}                           ← section block (mrkdwn)
+        ↳ {domain}                        ← context block (smaller text)
+    """
+    claim = safe_mrkdwn(item.get("claim", ""))
+    url_raw = (item.get("source_url") or "").strip()
+
+    if claim and url_raw:
+        return [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"•  {claim}"},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"  ↳  {_safe_url_link(url_raw)}"}
+                ],
+            },
+        ]
+    if not claim:
+        return None
+    # Unsourced claim from here on
+    if is_dc and is_unsourced_dc_count(claim):
+        return None
+    if is_dc:
+        # Even non-DC-count items inside the DC section are risky; drop unsourced.
+        return None
+    # Unsourced non-DC claim — flag with the unverified prefix; no source line.
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"•  {UNVERIFIED_PREFIX} — {claim}",
+            },
+        }
+    ]
+
+
+def _build_section_blocks(
+    header: str, key: str, findings: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """All blocks for one topic section: header + per-claim cards (or
+    a single empty-state block if no claims survived sourcing/DC rules)."""
+    items: List[Dict[str, str]] = findings.get(key) or []
+    is_dc = key == "dc_intel"
+
+    rendered: List[List[Dict[str, Any]]] = []
+    for item in items:
+        card = _render_fact_card(item, is_dc=is_dc)
+        if card is not None:
+            rendered.append(card)
+
+    overflow = 0
+    if len(rendered) > MAX_CLAIMS_PER_SECTION:
+        overflow = len(rendered) - MAX_CLAIMS_PER_SECTION
+        rendered = rendered[:MAX_CLAIMS_PER_SECTION]
+
+    blocks: List[Dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{header}*"},
+        }
+    ]
+    if not rendered:
+        empty = "_" + (DC_NO_DATA if is_dc else NO_DATA) + "_"
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": empty}}
+        )
+        return blocks
+
+    for card in rendered:
+        blocks.extend(card)
+
+    if overflow:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"_…and {overflow} more_"}
+                ],
+            }
+        )
+    return blocks
+
+
+def build_research_blocks(findings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Per-claim card layout (V1.5 UX pass):
+
+      • header block — 🏢 Account Name
+      • for each topic:
+          – section block with bold topic header
+          – per-claim:
+              section block with the claim
+              context block with the source domain link
+          – overflow context block ("…and N more") if needed
+      • divider before research gaps
+      • section block for research gaps
+
+    Visually breaks up the wall-of-text 5-section dump into individually
+    scannable cards, while staying under Slack's 50-block-per-message
+    hard limit at MAX_CLAIMS_PER_SECTION = 4.
     """
     account = safe_mrkdwn(findings.get("account_name", "Unknown"))
     blocks: List[Dict[str, Any]] = [
@@ -149,16 +259,8 @@ def build_research_blocks(findings: Dict[str, Any]) -> List[Dict[str, Any]]:
         },
     ]
     for header, key in _FACT_SECTIONS:
-        blocks.append({"type": "divider"})
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": _render_fact_section(header, key, findings),
-                },
-            }
-        )
+        blocks.extend(_build_section_blocks(header, key, findings))
+
     blocks.append({"type": "divider"})
     blocks.append(
         {
