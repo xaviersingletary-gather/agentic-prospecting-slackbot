@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from src.integrations.hubspot.contact_check import tag_contacts
 from src.research.personas import map_personas_to_title_keywords
 from src.research.sessions import ResearchSession
+from src.research.title_filter import filter_by_persona_fit
 from src.security.exception_logger import safe_log_exception
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ def build_tagged_contacts(
 
     if not isinstance(contacts, list):
         contacts = []
+
+    # Subtract Apollo's fuzzy-match false-positives (e.g. VP IT Ops on
+    # an Operations Lead pull). Default-permissive on missing titles.
+    contacts = filter_by_persona_fit(contacts, session.personas or [])
 
     if hubspot_contact_client is None:
         return {

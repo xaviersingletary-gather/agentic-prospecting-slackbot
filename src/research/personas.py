@@ -20,6 +20,11 @@ from typing import Dict, Iterable, List, TypedDict
 class PersonaConfig(TypedDict):
     label: str
     title_keywords: List[str]
+    # Word-boundary terms that disqualify a contact even if Apollo
+    # returned them. Drives `title_filter.filter_by_persona_fit`. Each
+    # term is matched case-insensitively with `\b…\b` so "IT" hits
+    # "VP IT Operations" but not "Bit" or "Fitness".
+    negative_keywords: List[str]
 
 
 PERSONAS: Dict[str, PersonaConfig] = {
@@ -33,6 +38,14 @@ PERSONAS: Dict[str, PersonaConfig] = {
             "Industrial Engineer",
             "Continuous Improvement Manager",
         ],
+        # CI/IE/Automation directors. Exclude software/IT engineering
+        # ladders and revenue-side roles ("Sales Engineering" is a real
+        # title that Apollo will surface for "VP Engineering").
+        "negative_keywords": [
+            "IT", "Information Technology", "Software", "DevOps",
+            "Sales Engineering", "Customer", "Product", "Marketing",
+            "Finance", "People",
+        ],
     },
     "operations_lead": {
         "label": "Operations Lead — Warehouse / DC / Inventory Ops",
@@ -44,6 +57,13 @@ PERSONAS: Dict[str, PersonaConfig] = {
             "Director of Inventory Control",
             "Director of Fulfillment",
         ],
+        # The biggest noise source on this persona — "VP Operations"
+        # over-pulls Sales Ops, IT Ops, RevOps, People Ops, etc.
+        "negative_keywords": [
+            "IT", "Information Technology", "Sales", "Finance",
+            "Marketing", "HR", "Human Resources", "People", "Revenue",
+            "Customer Success", "Customer Service", "Legal", "Product",
+        ],
     },
     "executive": {
         "label": "Executive — CSCO / COO / SVP Ops",
@@ -54,6 +74,13 @@ PERSONAS: Dict[str, PersonaConfig] = {
             "SVP Supply Chain",
             "EVP Operations",
         ],
+        # SVP/EVP Operations is the trap — Apollo returns SVP Sales Ops,
+        # SVP People, SVP Marketing Ops on this filter.
+        "negative_keywords": [
+            "IT", "Information Technology", "Sales", "Marketing",
+            "Finance", "HR", "Human Resources", "People", "Legal",
+            "Product", "Revenue", "Customer",
+        ],
     },
     "compliance_lead": {
         "label": "Compliance Lead — IT / Safety / EHS",
@@ -63,6 +90,12 @@ PERSONAS: Dict[str, PersonaConfig] = {
             "Director of EHS",
             "VP Safety",
             "Director of Loss Prevention",
+        ],
+        # IT/Safety/EHS IS the persona — DO NOT exclude IT here.
+        # Filter out the unrelated "Director of …" matches.
+        "negative_keywords": [
+            "Sales", "Marketing", "Finance", "HR", "Human Resources",
+            "Customer Success", "Product", "Revenue",
         ],
     },
 }
