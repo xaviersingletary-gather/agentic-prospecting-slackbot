@@ -22,6 +22,7 @@ build/
 # Logs
 *.log
 logs/*.jsonl
+logs/account_snapshots/
 
 # macOS
 .DS_Store

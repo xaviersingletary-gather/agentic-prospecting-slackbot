@@ -23,6 +23,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from src.memory.blocks import build_new_since_blocks
+from src.memory.diff import diff_findings
+from src.memory.snapshots import get_latest_snapshot, save_snapshot
 from src.research.angle_blocks import build_angle_blocks
 from src.research.angle_builder import build_angles
 from src.research.clients_factory import (
@@ -157,6 +160,15 @@ def _build_account_blocks(
     Side effect: cache the findings on the session so Stage 2's angle
     builder can ground its output without re-running Exa+OpenRouter.
     """
+    # V1.5 memory layer: load the most recent snapshot before findings
+    # run, so we can diff after. Memory I/O is best-effort — never let
+    # it break the research response.
+    prev_snapshot: Optional[Dict[str, Any]] = None
+    try:
+        prev_snapshot = get_latest_snapshot(session.account_name)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "memory: get_latest_snapshot failed")
+
     try:
         findings = build_findings(session, on_progress=on_progress)
     except Exception as e:  # noqa: BLE001
@@ -180,7 +192,23 @@ def _build_account_blocks(
     # Also stash on the dataclass directly so callers holding the
     # session reference (e.g. tests, legacy run_research) can read it.
     session.findings = findings
-    return build_research_blocks(findings)
+
+    new_since_blocks: List[Dict[str, Any]] = []
+    if prev_snapshot is not None:
+        try:
+            diff = diff_findings(prev_snapshot.get("findings"), findings)
+            new_since_blocks = build_new_since_blocks(
+                diff, prev_snapshot.get("saved_at")
+            )
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "memory: diff/render failed")
+
+    try:
+        save_snapshot(session.account_name, findings)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "memory: save_snapshot failed")
+
+    return new_since_blocks + build_research_blocks(findings)
 
 
 def _build_persona_blocks(
