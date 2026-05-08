@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ProgressCB = Optional[Callable[[str], None]]
@@ -241,10 +242,12 @@ def _run_exa_searches(
     account_name: str,
     on_progress: ProgressCB = None,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], bool]:
-    """Run one Exa search per topic. Returns (snippets_by_topic, all_failed).
+    """Run all Exa searches concurrently. Returns (snippets_by_topic, all_failed).
 
     `all_failed` is True only if every topic raised — partial failures
-    just yield empty lists for the affected topics.
+    just yield empty lists for the affected topics. `on_progress` is
+    drained in the calling thread (via `as_completed`), so the callback
+    is never invoked from a worker thread.
     """
     try:
         client = ExaSearchClient(api_key=settings.EXA_API_KEY)
@@ -252,25 +255,36 @@ def _run_exa_searches(
         logger.error("[findings_builder] Exa client init failed: %s", type(e).__name__)
         return ({k: [] for k, _ in _TOPIC_QUERIES}, True)
 
+    _emit(on_progress, f"🔍 Searching {len(_TOPIC_QUERIES)} topics in parallel…")
+
+    def _search_one(topic: str, template: str) -> List[Dict[str, Any]]:
+        return client.search(
+            template.format(company=account_name),
+            num_results=EXA_NUM_RESULTS,
+        )
+
     snippets_by_topic: Dict[str, List[Dict[str, Any]]] = {}
     fails = 0
-    for topic, template in _TOPIC_QUERIES:
-        label = _TOPIC_LABELS.get(topic, topic)
-        _emit(on_progress, f"🔍 Searching {label}…")
-        query = template.format(company=account_name)
-        try:
-            hits = client.search(query, num_results=EXA_NUM_RESULTS)
-        except Exception as e:
-            logger.error(
-                "[findings_builder] Exa search %s failed: %s",
-                topic, type(e).__name__,
-            )
-            hits = []
-            fails += 1
-        snippets_by_topic[topic] = hits
+    with ThreadPoolExecutor(max_workers=len(_TOPIC_QUERIES)) as pool:
+        future_to_topic = {
+            pool.submit(_search_one, topic, template): topic
+            for topic, template in _TOPIC_QUERIES
+        }
+        for fut in as_completed(future_to_topic):
+            topic = future_to_topic[fut]
+            label = _TOPIC_LABELS.get(topic, topic)
+            try:
+                snippets_by_topic[topic] = fut.result()
+                _emit(on_progress, f"✅ {label} done")
+            except Exception as e:
+                logger.error(
+                    "[findings_builder] Exa search %s failed: %s",
+                    topic, type(e).__name__,
+                )
+                snippets_by_topic[topic] = []
+                fails += 1
 
-    all_failed = fails == len(_TOPIC_QUERIES)
-    return snippets_by_topic, all_failed
+    return snippets_by_topic, fails == len(_TOPIC_QUERIES)
 
 
 def _call_openrouter(

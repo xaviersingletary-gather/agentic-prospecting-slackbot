@@ -232,3 +232,85 @@ def test_claude_json_in_fenced_code_block_is_parsed(mocker):
     )
     findings = build_findings(s)
     assert len(findings["trigger_events"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Parallel Exa search — wall-clock + behavior contract
+# ---------------------------------------------------------------------------
+
+def test_exa_searches_run_in_parallel(mocker):
+    """The 4 Exa searches must execute concurrently. Sequential floor for
+    a 0.4s-per-call mock is ~1.6s; parallel completes in ~0.4s. Cap at
+    1.0s to leave headroom for thread-pool spin-up under CI load."""
+    import time
+    from src.research.findings_builder import _run_exa_searches
+
+    def slow_search(query, num_results):
+        time.sleep(0.4)
+        return [{"title": "t", "url": "https://example.com", "snippet": "s"}]
+
+    mock_client = MagicMock()
+    mock_client.search.side_effect = slow_search
+    mocker.patch(
+        "src.research.findings_builder.ExaSearchClient",
+        return_value=mock_client,
+    )
+
+    start = time.monotonic()
+    snippets, all_failed = _run_exa_searches("Kroger")
+    elapsed = time.monotonic() - start
+
+    assert not all_failed
+    assert len(snippets) == 4
+    assert elapsed < 1.0, f"expected parallel execution; took {elapsed:.2f}s"
+
+
+def test_partial_exa_failure_yields_empty_for_failed_topic(mocker):
+    """One topic raising must NOT break the others. The failed topic gets
+    [] in the return dict; `all_failed` stays False."""
+    from src.research.findings_builder import _run_exa_searches
+
+    def search(query, num_results):
+        # Competitor query template contains "Symbotic" — fail only that one.
+        if "Symbotic" in query:
+            raise RuntimeError("boom")
+        return [{"title": "t", "url": "https://example.com", "snippet": "s"}]
+
+    mock_client = MagicMock()
+    mock_client.search.side_effect = search
+    mocker.patch(
+        "src.research.findings_builder.ExaSearchClient",
+        return_value=mock_client,
+    )
+
+    snippets, all_failed = _run_exa_searches("Kroger")
+    assert not all_failed
+    assert snippets["competitor_signals"] == []
+    assert snippets["trigger_events"] != []
+    assert snippets["dc_intel"] != []
+    assert snippets["board_initiatives"] != []
+
+
+def test_progress_emitted_for_each_topic(mocker):
+    """Every topic label must surface in on_progress, regardless of
+    completion order."""
+    from src.research.findings_builder import _run_exa_searches
+
+    mock_client = MagicMock()
+    mock_client.search.return_value = []
+    mocker.patch(
+        "src.research.findings_builder.ExaSearchClient",
+        return_value=mock_client,
+    )
+
+    seen: list[str] = []
+    _run_exa_searches("Kroger", on_progress=lambda m: seen.append(m))
+
+    joined = " ".join(seen).lower()
+    for label in (
+        "trigger events",
+        "competitor signals",
+        "distribution / facility intel",
+        "board initiatives",
+    ):
+        assert label in joined, f"missing progress for {label!r}; saw: {seen}"
