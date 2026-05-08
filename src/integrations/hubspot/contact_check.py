@@ -27,13 +27,17 @@ import time
 from typing import Optional, Sequence
 from urllib.parse import quote
 
+import httpx
+
 from src.security.exception_logger import safe_log_exception
 from src.security.safe_mrkdwn import safe_mrkdwn
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 10
-INTER_BATCH_SLEEP_SECONDS = 0.1  # >=100ms per spec §1.2.1
+# HubSpot search endpoints cap at ~5 req/sec per token (much stricter than the
+# 100/10s general limit). 250ms between requests stays comfortably under and
+# avoids 429 storms; the client itself retries on 429 as a second line.
+INTER_REQUEST_SLEEP_SECONDS = 0.25
 WARNING_BANNER = "HubSpot check unavailable — showing unverified contacts"
 HUBSPOT_BASE_APP_URL = "https://app.hubspot.com"
 
@@ -139,36 +143,41 @@ def tag_contacts(
     warning: Optional[str] = None
     contact_list = list(contacts)
 
-    for batch_idx in range(0, len(contact_list), BATCH_SIZE):
-        # Inter-batch throttle (spec §1.2.1: 100 req / 10s).
-        if batch_idx > 0:
-            time.sleep(INTER_BATCH_SLEEP_SECONDS)
+    for idx, contact in enumerate(contact_list):
+        # Per-request throttle: 4 req/sec, under HubSpot search's ~5/sec cap.
+        if idx > 0:
+            time.sleep(INTER_REQUEST_SLEEP_SECONDS)
 
-        batch = contact_list[batch_idx : batch_idx + BATCH_SIZE]
-        for contact in batch:
-            out = dict(contact)
-            try:
-                match = _lookup_one(client, contact)
-            except Exception as e:  # noqa: BLE001 — graceful fallback
-                # S1.2.1a: exception name only; do NOT log str(e).
-                safe_log_exception(logger, e, "hubspot lookup failed")
-                warning = WARNING_BANNER
-                out["status"] = "NET NEW"
-                tagged.append(out)
-                continue
-
-            if match is not None:
-                out["status"] = "EXISTS IN HUBSPOT"
-                out["hubspot_url"] = build_contact_url(
-                    portal_id=portal_id,
-                    contact_id=match.get("id", ""),
+        out = dict(contact)
+        try:
+            match = _lookup_one(client, contact)
+        except Exception as e:  # noqa: BLE001 — graceful fallback
+            # S1.2.1a: exception name only; do NOT log str(e).
+            safe_log_exception(logger, e, "hubspot lookup failed")
+            # Status code is a small int — safe to log; helps diagnose 429
+            # vs 401 vs 5xx without the next operator needing a probe.
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(
+                    "hubspot lookup failed: http_status=%d",
+                    e.response.status_code,
                 )
-                # Carry the HubSpot-known props forward for rendering.
-                hs_props = match.get("properties", {}) or {}
-                out.setdefault("hubspot_properties", hs_props)
-            else:
-                out["status"] = "NET NEW"
+            warning = WARNING_BANNER
+            out["status"] = "NET NEW"
             tagged.append(out)
+            continue
+
+        if match is not None:
+            out["status"] = "EXISTS IN HUBSPOT"
+            out["hubspot_url"] = build_contact_url(
+                portal_id=portal_id,
+                contact_id=match.get("id", ""),
+            )
+            # Carry the HubSpot-known props forward for rendering.
+            hs_props = match.get("properties", {}) or {}
+            out.setdefault("hubspot_properties", hs_props)
+        else:
+            out["status"] = "NET NEW"
+        tagged.append(out)
 
     # Group: existing first, net-new second. Stable within each group.
     existing = [c for c in tagged if c.get("status") == "EXISTS IN HUBSPOT"]

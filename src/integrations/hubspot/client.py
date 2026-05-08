@@ -11,15 +11,24 @@ Public API:
 
 Both raise httpx.HTTPStatusError on 5xx so callers (contact_check.tag_contacts)
 can fall back gracefully per spec §1.2.1.
+
+`_post` retries transparently on 429 (HubSpot's search endpoint cap is ~5
+req/sec, far stricter than the 100/10s general limit). We honor the
+`Retry-After` header when present and otherwise back off exponentially.
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import httpx
 
 SEARCH_PATH = "/crm/v3/objects/contacts/search"
 BASE_URL = "https://api.hubapi.com"
+
+RATE_LIMIT_MAX_ATTEMPTS = 3
+RATE_LIMIT_INITIAL_BACKOFF_SECONDS = 0.5
+RATE_LIMIT_MAX_WAIT_SECONDS = 5.0
 
 # Levenshtein-based confidence threshold for fuzzy name+company match.
 NAME_MATCH_CONFIDENCE_THRESHOLD = 0.9
@@ -78,8 +87,20 @@ class HubSpotContactClient:
 
     def _post(self, path: str, payload: dict) -> httpx.Response:
         url = f"{BASE_URL}{path}"
+        backoff = RATE_LIMIT_INITIAL_BACKOFF_SECONDS
         with httpx.Client(timeout=self.timeout) as client:
-            return client.post(url, headers=self.headers, json=payload)
+            for attempt in range(RATE_LIMIT_MAX_ATTEMPTS):
+                response = client.post(url, headers=self.headers, json=payload)
+                if response.status_code != 429 or attempt == RATE_LIMIT_MAX_ATTEMPTS - 1:
+                    return response
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else backoff
+                except ValueError:
+                    wait = backoff
+                time.sleep(min(wait, RATE_LIMIT_MAX_WAIT_SECONDS))
+                backoff *= 2
+            return response  # pragma: no cover — loop always returns above
 
     # -- Public API ----------------------------------------------------------
 

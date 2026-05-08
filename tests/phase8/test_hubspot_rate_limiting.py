@@ -1,50 +1,58 @@
 """Phase 7 / Spec §1.2.1 — Rate limiting.
 
-HubSpot allows 100 requests/10 seconds. We batch contact lookups in groups of
-10 with a >=100ms sleep between batches. Test patches `time.sleep` to confirm
-the throttle calls happen, without actually waiting.
+HubSpot's search endpoint caps at ~5 req/sec per token (stricter than the
+general 100/10s limit). We throttle to one request every 250ms (=4 req/sec)
+to stay safely under, and the client itself retries on 429 as a second line.
+Tests patch `time.sleep` so they don't actually wait.
 """
 from unittest.mock import MagicMock, patch
 
 
-def test_rate_limit_sleeps_between_batches_of_ten():
-    from src.integrations.hubspot.contact_check import tag_contacts
+def test_inter_request_sleep_between_lookups():
+    from src.integrations.hubspot.contact_check import (
+        INTER_REQUEST_SLEEP_SECONDS,
+        tag_contacts,
+    )
 
     client = MagicMock()
-    # All return None -> all NET NEW; logic still iterates all 25 and batches.
     client.search_contact_by_email.return_value = None
     client.search_contact_by_name_company.return_value = None
 
+    n = 5
     contacts = [
         {"first_name": f"F{i}", "last_name": f"L{i}", "email": f"x{i}@k.com", "company": "K"}
-        for i in range(25)
+        for i in range(n)
     ]
 
     with patch("src.integrations.hubspot.contact_check.time.sleep") as mock_sleep:
         result = tag_contacts(contacts, client, portal_id="p")
-        # All 25 are processed
-        assert len(result["contacts"]) == 25
-        # 25 contacts in batches of 10 -> 3 batches -> at least 2 sleeps
-        # between the 3 batches. (Implementation may also sleep before the
-        # first batch; we just require >=2 sleeps with >=0.1s.)
-        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
-        long_sleeps = [s for s in sleep_calls if s >= 0.1]
-        assert len(long_sleeps) >= 2, f"expected >=2 batch sleeps, got {sleep_calls}"
+        assert len(result["contacts"]) == n
+        # n contacts → n-1 inter-request sleeps at >=INTER_REQUEST_SLEEP_SECONDS.
+        throttle_sleeps = [
+            c.args[0] for c in mock_sleep.call_args_list
+            if c.args[0] >= INTER_REQUEST_SLEEP_SECONDS
+        ]
+        assert len(throttle_sleeps) == n - 1, (
+            f"expected {n-1} throttle sleeps, got {[c.args[0] for c in mock_sleep.call_args_list]}"
+        )
 
 
-def test_rate_limit_no_sleep_when_under_one_batch():
-    """A single batch of <=10 contacts should not trigger any inter-batch sleep."""
-    from src.integrations.hubspot.contact_check import tag_contacts
+def test_no_sleep_for_single_contact():
+    """One contact → no throttle (nothing to throttle against)."""
+    from src.integrations.hubspot.contact_check import (
+        INTER_REQUEST_SLEEP_SECONDS,
+        tag_contacts,
+    )
 
     client = MagicMock()
     client.search_contact_by_email.return_value = None
     client.search_contact_by_name_company.return_value = None
 
-    contacts = [
-        {"first_name": f"F{i}", "last_name": f"L{i}", "email": f"x{i}@k.com", "company": "K"}
-        for i in range(5)
-    ]
+    contacts = [{"first_name": "F", "last_name": "L", "email": "x@k.com", "company": "K"}]
     with patch("src.integrations.hubspot.contact_check.time.sleep") as mock_sleep:
         tag_contacts(contacts, client, portal_id="p")
-        long_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 0.1]
-        assert len(long_sleeps) == 0
+        throttle_sleeps = [
+            c.args[0] for c in mock_sleep.call_args_list
+            if c.args[0] >= INTER_REQUEST_SLEEP_SECONDS
+        ]
+        assert len(throttle_sleeps) == 0
