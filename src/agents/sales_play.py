@@ -13,6 +13,25 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Intent-emphasis stanzas (V1 Daily-Use spec §5 Move 1). Prepended to the
+# plays prompt so the agent leans toward the rep's actual use case.
+_INTENT_EMPHASIS = {
+    "outbound": (
+        "EMPHASIS: prioritize trigger events, automation vendor signals, "
+        "and cold-open hooks suitable for a first-touch email."
+    ),
+    "pre_call": (
+        "EMPHASIS: prioritize the most recent news, executive moves, and "
+        "discovery questions for an upcoming call."
+    ),
+    "renewal": (
+        "EMPHASIS: prioritize expansion signals, risk indicators, and "
+        "existing-relationship strengthening cues."
+    ),
+    "just_digging": "EMPHASIS: broad and balanced coverage.",
+}
+
+
 _PLAYS_PROMPT = """You are a senior AE at Gather AI — a warehouse drone inventory automation company.
 
 Gather AI automates inventory counting with autonomous drones. You sell to warehouse operators with 10+ distribution centers. Core value props:
@@ -170,6 +189,7 @@ class SalesPlayAgent:
         research_data: dict,
         contacts: list[dict],
         account_name: str,
+        intent_type: str | None = None,
     ) -> dict:
         """
         Synthesize research + contacts into AE-level plays.
@@ -186,6 +206,9 @@ class SalesPlayAgent:
             research_summary=research_summary,
             contacts_summary=contacts_summary,
         )
+        emphasis = _INTENT_EMPHASIS.get(intent_type or "", "")
+        if emphasis:
+            prompt = f"{emphasis}\n\n{prompt}"
 
         try:
             response = httpx.post(

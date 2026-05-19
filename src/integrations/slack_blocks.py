@@ -1,4 +1,6 @@
-from typing import Optional
+from typing import Any, Dict, List, Optional
+
+from src.security.safe_mrkdwn import safe_mrkdwn
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +832,120 @@ def session_complete_card(account_name: str, sequence_count: int, persona_names:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Diff-first cold-start front door (V1 Daily-Use spec §5 Move 4)
+# ---------------------------------------------------------------------------
+
+def _format_saved_at(saved_at: Optional[str]) -> str:
+    """Render the snapshot timestamp as a human-readable date.
+
+    Snapshots store `saved_at` as ISO-8601 UTC (e.g. `2026-05-15T18:42:11Z`).
+    Falls back to the raw string if it can't be parsed — caller still gets
+    *something* to display, but never raises.
+    """
+    if not saved_at:
+        return "an unknown date"
+    try:
+        from datetime import datetime
+        s = saved_at.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%b %d, %Y")
+    except (ValueError, TypeError):
+        return safe_mrkdwn(str(saved_at))
+
+
+def diff_front_door_card(
+    snapshot: Dict[str, Any],
+    account_name: str,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    """Re-entry card shown when a rep DMs an account we've researched recently.
+
+    Surfaces the saved_at date + a few high-signal fields from the prior
+    snapshot, then offers three buttons:
+      - `re_research`    — start a fresh research run.
+      - `dig_into_new`   — open the prior brief without re-running APIs.
+      - `ask_specific`   — hint the rep to @-mention with a question.
+
+    Every interpolated string is escaped via `safe_mrkdwn` (CLAUDE.md §Slack
+    output safety) since `snapshot["findings"]` may carry attacker-controlled
+    text from poisoned Exa pages.
+    """
+    findings = snapshot.get("findings") or {}
+    if not isinstance(findings, dict):
+        findings = {}
+
+    saved_at_human = _format_saved_at(snapshot.get("saved_at"))
+    account_safe = safe_mrkdwn(account_name)
+
+    header_text = f"I last researched *{account_safe}* on *{saved_at_human}*."
+
+    body_lines: List[str] = ["*In that snapshot:*"]
+
+    facility_count = findings.get("facility_count")
+    if isinstance(facility_count, (int, float)) and facility_count:
+        body_lines.append(f"• ~{int(facility_count):,} facilities tracked")
+
+    triggers = findings.get("trigger_events") or []
+    if isinstance(triggers, list):
+        for t in triggers[:2]:
+            if not isinstance(t, dict):
+                continue
+            claim = t.get("claim") or t.get("description") or ""
+            claim = safe_mrkdwn(str(claim)).strip()
+            if claim:
+                body_lines.append(f"• Trigger: {claim}")
+
+    initiatives = findings.get("board_initiatives") or []
+    if isinstance(initiatives, list):
+        for it in initiatives[:2]:
+            if not isinstance(it, dict):
+                continue
+            title = it.get("title") or it.get("claim") or ""
+            title = safe_mrkdwn(str(title)).strip()
+            if title:
+                body_lines.append(f"• Initiative: {title}")
+
+    if len(body_lines) == 1:
+        body_lines.append("_No high-signal fields captured — re-research for fresh data._")
+
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": header_text},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(body_lines)},
+        },
+        {
+            "type": "actions",
+            "block_id": f"diff_front_door_{session_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Re-research"},
+                    "style": "primary",
+                    "action_id": "re_research",
+                    "value": session_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Dig into what's new"},
+                    "action_id": "dig_into_new",
+                    "value": session_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Ask a specific question"},
+                    "action_id": "ask_specific",
+                    "value": session_id,
+                },
+            ],
+        },
+    ]
+
+
 def sequence_brief_card(sequence: dict, persona: dict) -> list:
     lane = sequence.get("lane", "MDR")
     steps = sequence.get("steps", [])
@@ -870,3 +986,62 @@ def sequence_brief_card(sequence: dict, persona: dict) -> list:
         })
 
     return blocks
+
+
+# ---------------------------------------------------------------------------
+# Suggested follow-up questions (V1 Daily-Use spec §5 Move 3)
+# ---------------------------------------------------------------------------
+
+# Slack hard caps the displayed `text` of a button at 75 chars and the
+# `value` payload at 2000 chars (action elements). Anything longer is
+# rejected at post time. We truncate locally to keep posts safe.
+_BUTTON_TEXT_CAP = 75
+_BUTTON_VALUE_CAP = 2000
+
+
+def _truncate(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[: max(0, cap - 1)].rstrip() + "…"
+
+
+def suggested_questions_block(questions: List[str]) -> List[Dict[str, Any]]:
+    """Render 3-4 next-question prompts as a single Slack `actions` block.
+
+    Each button's `action_id` is `suggested_question`; the question text is
+    the button label AND the payload `value`. Clicking the button routes
+    through `handle_followup` (Phase 5) — identical pipeline to a typed
+    `@`-mention. Returns `[]` if `questions` is empty (defensive — the
+    caller skips appending and the brief ships clean).
+    """
+    if not questions:
+        return []
+
+    elements: List[Dict[str, Any]] = []
+    for q in questions:
+        if not isinstance(q, str) or not q.strip():
+            continue
+        cleaned = q.strip()
+        # Plain_text button labels — Slack disallows mrkdwn here entirely, so
+        # we don't need safe_mrkdwn. Truncate for the 75-char Slack cap.
+        button_text = _truncate(cleaned, _BUTTON_TEXT_CAP)
+        button_value = cleaned[:_BUTTON_VALUE_CAP]
+        elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": button_text},
+                "action_id": "suggested_question",
+                "value": button_value,
+            }
+        )
+
+    if not elements:
+        return []
+
+    return [
+        {
+            "type": "actions",
+            "block_id": "suggested_questions",
+            "elements": elements,
+        }
+    ]

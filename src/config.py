@@ -63,5 +63,8 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "info")
     MOCK_PERSONAS: bool = os.getenv("MOCK_PERSONAS", "false").lower() == "true"
 
+    # Memory / diff-first cold-start (V1 Daily-Use spec §5 Move 4)
+    SNAPSHOT_FRESHNESS_DAYS: int = int(os.getenv("SNAPSHOT_FRESHNESS_DAYS", "14"))
+
 
 settings = Settings()

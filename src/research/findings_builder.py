@@ -61,6 +61,32 @@ CITATION_RULE = (
     "include the claim."
 )
 
+# Intent-emphasis stanzas threaded in from the V1 Daily-Use intent
+# capture card (spec §5 Move 1). Selected on the rep's intent click and
+# concatenated into the system prompt so the extractor leans appropriately.
+_INTENT_EMPHASIS = {
+    "outbound": (
+        "EMPHASIS: prioritize trigger events, automation vendor signals, "
+        "and cold-open hooks suitable for a first-touch email."
+    ),
+    "pre_call": (
+        "EMPHASIS: prioritize the most recent news, executive moves, and "
+        "discovery questions for an upcoming call."
+    ),
+    "renewal": (
+        "EMPHASIS: prioritize expansion signals, risk indicators, and "
+        "existing-relationship strengthening cues."
+    ),
+    "just_digging": "EMPHASIS: broad and balanced coverage.",
+}
+
+
+def _intent_emphasis(intent_type: Optional[str]) -> str:
+    if not intent_type:
+        return ""
+    return _INTENT_EMPHASIS.get(intent_type, "")
+
+
 SYSTEM_PROMPT = f"""You are an account research extractor for a B2B \
 warehouse-automation sales team. Your job is to read snippets from public \
 web search results about a target company and extract structured intel.
@@ -188,8 +214,17 @@ def build_findings(
         )
 
     _emit(on_progress, "🤖 Synthesizing findings…")
+    normalized = getattr(session, "normalized_request", None) or {}
+    intent_type = normalized.get("intent_type") if isinstance(normalized, dict) else None
+    disambiguation = normalized.get("disambiguation") if isinstance(normalized, dict) else None
     try:
-        raw_text = _call_openrouter(account_name, personas, snippets_by_topic)
+        raw_text = _call_openrouter(
+            account_name,
+            personas,
+            snippets_by_topic,
+            intent_type=intent_type,
+            disambiguation=disambiguation,
+        )
     except Exception as e:
         logger.error("[findings_builder] OpenRouter call failed: %s", type(e).__name__)
         return _empty_findings(
@@ -291,6 +326,8 @@ def _call_openrouter(
     account_name: str,
     personas: List[str],
     snippets_by_topic: Dict[str, List[Dict[str, Any]]],
+    intent_type: Optional[str] = None,
+    disambiguation: Optional[str] = None,
 ) -> str:
     """Call OpenRouter (OpenAI-compatible). No tools. Snippets in user message."""
     model = (
@@ -302,6 +339,20 @@ def _call_openrouter(
         api_key=settings.OPENROUTER_API_KEY,
         base_url=settings.OPENROUTER_BASE_URL,
     )
+
+    # Captured-intent emphasis is prepended to the system prompt so the
+    # extractor leans toward the rep's actual use case (outbound, pre-call,
+    # renewal, just digging). Spec §5 Move 1.
+    emphasis = _intent_emphasis(intent_type)
+    system_content = SYSTEM_PROMPT
+    if emphasis:
+        system_content = f"{emphasis}\n\n{SYSTEM_PROMPT}"
+    if disambiguation:
+        # Pin the entity so the model doesn't drift into the wrong company.
+        system_content = (
+            f"DISAMBIGUATION: the rep specified '{disambiguation}'.\n\n"
+            f"{system_content}"
+        )
 
     user_content = _build_user_message(account_name, personas, snippets_by_topic)
 
@@ -315,7 +366,7 @@ def _call_openrouter(
             max_tokens=MAX_TOKENS,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
         )
@@ -331,7 +382,7 @@ def _call_openrouter(
             model=model,
             max_tokens=MAX_TOKENS,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
         )

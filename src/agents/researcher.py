@@ -61,6 +61,26 @@ def calculate_exception_tax(total_sqft: int, sqft_source: str) -> dict:
 # LLM synthesis prompt
 # ---------------------------------------------------------------------------
 
+# Intent-emphasis stanzas threaded in from the V1 Daily-Use intent
+# capture card (spec §5 Move 1). Inserted near the top of the synthesis
+# prompt so the analyst leans toward the rep's actual use case.
+_INTENT_EMPHASIS = {
+    "outbound": (
+        "EMPHASIS: prioritize trigger events, automation vendor signals, "
+        "and cold-open hooks suitable for a first-touch email."
+    ),
+    "pre_call": (
+        "EMPHASIS: prioritize the most recent news, executive moves, and "
+        "discovery questions for an upcoming call."
+    ),
+    "renewal": (
+        "EMPHASIS: prioritize expansion signals, risk indicators, and "
+        "existing-relationship strengthening cues."
+    ),
+    "just_digging": "EMPHASIS: broad and balanced coverage.",
+}
+
+
 _SYNTHESIS_PROMPT = """You are a B2B sales research analyst preparing an account brief for Gather AI, a warehouse drone inventory automation company.
 
 Gather AI sells to warehouse operators with 10+ DCs. Key buying signals: hiring automation/CI/inventory roles, new DCs opening, WMS migrations, shrink/accuracy programs, executive ops mandates.
@@ -116,6 +136,7 @@ class CompanyResearchAgent:
         account_name: str,
         account_domain: Optional[str] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
+        intent_type: Optional[str] = None,
     ) -> dict:
         """
         Run full company research. Returns a CompanyResearch dict.
@@ -246,7 +267,7 @@ class CompanyResearchAgent:
         # Step 4: LLM synthesis
         # ------------------------------------------------------------------
         progress(f"⏳ Synthesizing research into structured brief...")
-        synthesis = self._synthesize(account_name, research_text)
+        synthesis = self._synthesize(account_name, research_text, intent_type=intent_type)
 
         # ------------------------------------------------------------------
         # Step 5: Exception Tax calculation
@@ -333,16 +354,24 @@ class CompanyResearchAgent:
 
         return "\n".join(sections)
 
-    def _synthesize(self, company_name: str, research_text: str) -> dict:
+    def _synthesize(
+        self,
+        company_name: str,
+        research_text: str,
+        intent_type: Optional[str] = None,
+    ) -> dict:
         """Call the LLM to synthesize raw research into structured JSON."""
         if not settings.OPENROUTER_API_KEY:
             logger.warning("[researcher] OPENROUTER_API_KEY not set — returning empty synthesis")
             return {"research_gaps": ["LLM synthesis unavailable — OPENROUTER_API_KEY not set"]}
 
+        emphasis = _INTENT_EMPHASIS.get(intent_type or "", "")
         prompt = _SYNTHESIS_PROMPT.format(
             company_name=company_name,
             research_text=research_text[:20_000],
         )
+        if emphasis:
+            prompt = f"{emphasis}\n\n{prompt}"
 
         try:
             response = httpx.post(

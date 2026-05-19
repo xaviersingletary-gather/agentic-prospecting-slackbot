@@ -129,6 +129,18 @@ def log_event(session_id: str, event_type: str, phase: int, rep_id: str, payload
 
 from src.handlers.dm_research import handle_research_dm as _v1_handle_dm
 from src.handlers.persona_select import handle_run_research_action as _v1_run_research_action
+from src.handlers.diff_front_door import (
+    ask_specific_hint as _v1_ask_specific_hint,
+    dig_into_new as _v1_dig_into_new,
+)
+from src.handlers.suggested_question_click import (
+    handle_suggested_question as _v1_handle_suggested_question,
+)
+from src.research.runner import run_account_research as _v1_run_account_research
+from src.research.sessions import (
+    create_session as _v1_create_session,
+    get_session as _v1_get_session,
+)
 
 
 @app.action("run_research")
@@ -142,6 +154,210 @@ def _v1_action_persona_checkboxes(ack):
     # clicks Run Research. We register the handler only to suppress
     # Bolt's "unhandled request" 404 noise.
     ack()
+
+
+# ---------------------------------------------------------------------------
+# Diff-first cold-start buttons (V1 Daily-Use spec §5 Move 4)
+# ---------------------------------------------------------------------------
+
+@app.action("re_research")
+def _v1_action_re_research(ack, body, say, client):
+    """Kick off a fresh research run from the diff front-door card.
+
+    Bypasses the snapshot short-circuit by calling `run_account_research`
+    directly with a fresh ResearchSession. Acks within 3s per CLAUDE.md.
+    """
+    ack()
+    try:
+        prior_session_id = body["actions"][0]["value"]
+        user_id = body["user"]["id"]
+        channel_id = body["channel"]["id"]
+        thread_ts = body["message"]["ts"]
+    except (KeyError, IndexError, TypeError) as e:
+        logger.warning("[re_research] malformed payload: %s", type(e).__name__)
+        return
+
+    # Recover the account name. Prefer the in-memory ResearchSession
+    # (created in `handle_research_dm`); fall back to the DB Session row.
+    account_name = None
+    sess = _v1_get_session(prior_session_id)
+    if sess is not None:
+        account_name = sess.account_name
+
+    if not account_name:
+        try:
+            db = SessionLocal()
+            try:
+                db_row = db.query(Session).filter(Session.id == prior_session_id).first()
+                if db_row is not None:
+                    account_name = db_row.account_name
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[re_research] DB lookup failed: %s", type(e).__name__)
+
+    if not account_name:
+        say(
+            text="Couldn't find the original account. Send the name again to start over.",
+            thread_ts=thread_ts,
+        )
+        return
+
+    def threaded_say(**kwargs):
+        kwargs.setdefault("thread_ts", thread_ts)
+        return say(**kwargs)
+
+    threaded_say(text=f":mag: Starting fresh research on *{account_name}*…")
+
+    new_session = _v1_create_session(rep_id=user_id, account_name=account_name)
+
+    try:
+        _v1_run_account_research(new_session, threaded_say)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[re_research] run_account_research failed: %s", type(e).__name__)
+
+
+@app.action("dig_into_new")
+def _v1_action_dig_into_new(ack, body, say, client):
+    """Render the prior research brief in-thread; no external API calls."""
+    ack()
+    try:
+        session_id = body["actions"][0]["value"]
+        channel_id = body["channel"]["id"]
+        thread_ts = body["message"]["ts"]
+    except (KeyError, IndexError, TypeError) as e:
+        logger.warning("[dig_into_new] malformed payload: %s", type(e).__name__)
+        return
+    _v1_dig_into_new(session_id, channel_id, thread_ts, client, say)
+
+
+@app.action("suggested_question")
+def _v1_action_suggested_question(ack, body, client):
+    """V1 Daily-Use spec §5 Move 3 — click a suggested-question chip
+    appended to the brief; routes through `handle_followup` (Phase 5)."""
+    _v1_handle_suggested_question(ack=ack, body=body, client=client)
+
+
+@app.action("ask_specific")
+def _v1_action_ask_specific(ack, body, say, client):
+    """Post the @-mention hint in the same thread."""
+    ack()
+    try:
+        thread_ts = body.get("message", {}).get("ts")
+    except AttributeError:
+        thread_ts = None
+
+    def threaded_say(**kwargs):
+        if thread_ts:
+            kwargs.setdefault("thread_ts", thread_ts)
+        return say(**kwargs)
+
+    _v1_ask_specific_hint(threaded_say, thread_ts=thread_ts)
+
+
+# ---------------------------------------------------------------------------
+# Intent capture buttons (V1 Daily-Use spec §5 Move 1)
+# ---------------------------------------------------------------------------
+
+@app.action("intent_disambig")
+def _v1_action_intent_disambig(ack, body, say, client):
+    """Persist a disambiguation selection without firing research.
+
+    The card stays valid; the rep also needs to click an intent button
+    for research to actually start. Acks within 3s per CLAUDE.md.
+    """
+    ack()
+    try:
+        raw_value = body["actions"][0]["value"]
+        session_id, label = raw_value.split("::", 1)
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        logger.warning("[intent_disambig] malformed payload: %s", type(e).__name__)
+        return
+
+    db = None
+    try:
+        db = SessionLocal()
+        db_session = db.query(Session).filter(Session.id == session_id).first()
+        if db_session is None:
+            return
+        normalized = dict(db_session.normalized_request or {})
+        normalized["disambiguation"] = label
+        db_session.normalized_request = normalized
+        flag_modified(db_session, "normalized_request")
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[intent_disambig] DB write failed: %s", type(e).__name__)
+    finally:
+        if db is not None:
+            db.close()
+
+
+@app.action("intent_type")
+def _v1_action_intent_type(ack, body, say, client):
+    """Persist intent + fire `run_account_research` (spec §5 Move 1)."""
+    ack()
+    try:
+        raw_value = body["actions"][0]["value"]
+        session_id, intent_value = raw_value.split("::", 1)
+        user_id = body["user"]["id"]
+        thread_ts = body.get("message", {}).get("ts")
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        logger.warning("[intent_type] malformed payload: %s", type(e).__name__)
+        return
+
+    # Persist intent. Look up the existing DB Session row created in
+    # `handle_research_dm`. Re-use it; do NOT create a new one.
+    normalized_for_runner = {}
+    account_name = None
+    db = None
+    try:
+        db = SessionLocal()
+        db_session = db.query(Session).filter(Session.id == session_id).first()
+        if db_session is None:
+            say(
+                text="That research request expired. Send the account name again to start over.",
+                thread_ts=thread_ts,
+            )
+            return
+        normalized = dict(db_session.normalized_request or {})
+        normalized["intent_type"] = intent_value
+        db_session.normalized_request = normalized
+        flag_modified(db_session, "normalized_request")
+        db.commit()
+        normalized_for_runner = dict(normalized)
+        account_name = db_session.account_name
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[intent_type] DB write failed: %s", type(e).__name__)
+        return
+    finally:
+        if db is not None:
+            db.close()
+
+    log_event(session_id, "intent_captured", 1, user_id, {
+        "intent_type": intent_value,
+        "disambiguation": normalized_for_runner.get("disambiguation"),
+    })
+
+    # Reconstruct the in-memory ResearchSession. The dataclass is what
+    # `run_account_research` expects; it reads `session_id`, `rep_id`,
+    # `account_name`, and (now) `normalized_request`.
+    sess = _v1_get_session(session_id)
+    if sess is None:
+        sess = _v1_create_session(rep_id=user_id, account_name=account_name or "")
+        # Force the session_id to match the DB row so any downstream
+        # caching keys are stable.
+        sess.session_id = session_id
+    sess.normalized_request = normalized_for_runner
+
+    def threaded_say(**kwargs):
+        if thread_ts:
+            kwargs.setdefault("thread_ts", thread_ts)
+        return say(**kwargs)
+
+    try:
+        _v1_run_account_research(sess, threaded_say)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[intent_type] run_account_research failed: %s", type(e).__name__)
 
 
 @app.message()

@@ -23,6 +23,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from src.agents.suggested_questions import (
+    FALLBACK_QUESTIONS,
+    generate_suggested_questions,
+    is_fallback,
+)
+from src.integrations.slack_blocks import suggested_questions_block
 from src.memory.blocks import build_new_since_blocks
 from src.memory.diff import diff_findings
 from src.memory.snapshots import get_latest_snapshot, save_snapshot
@@ -70,8 +76,43 @@ def run_account_research(
     is the typical caller. `on_progress`, if provided, is invoked with
     short status strings as each pipeline stage runs. Always invoked
     exactly once. Never raises.
+
+    Appends the V1 Daily-Use suggested-questions actions block to the
+    posted brief (spec §5 Move 3). The generator is best-effort: if it
+    times out (>5s) or fails entirely, the brief still ships and we log a
+    ``suggested_questions_slow`` / ``suggested_questions_failed``
+    ``WorkflowEvent`` so we can monitor degradation.
     """
     blocks = _build_account_blocks(session, on_progress=on_progress)
+
+    # Suggested questions (spec §5 Move 3) — best-effort. The generator
+    # itself returns a fallback on every error mode; we add a hard 5s wall
+    # clock here so a hanging LLM never blocks the brief.
+    actions_block: List[Dict[str, Any]] = []
+    failure_reason: Optional[str] = None
+    elapsed_seconds = 0.0
+    try:
+        import time as _time
+        started = _time.perf_counter()
+        questions = generate_suggested_questions(
+            session.findings, _personas_for_suggestions(session)
+        )
+        elapsed_seconds = _time.perf_counter() - started
+        if elapsed_seconds > 5.0:
+            failure_reason = "slow"
+        elif is_fallback(questions):
+            failure_reason = "fallback"
+        actions_block = suggested_questions_block(questions)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[runner] suggested_questions generation failed"
+        )
+        actions_block = []
+        failure_reason = "raised"
+
+    if actions_block:
+        blocks = blocks + actions_block
+
     try:
         post(
             blocks=blocks,
@@ -79,6 +120,11 @@ def run_account_research(
         )
     except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, "account research post() failed")
+
+    # Log degradation events AFTER the brief is posted so failure modes
+    # never block the rep's view of the research.
+    if failure_reason is not None:
+        _log_suggested_questions_event(session, failure_reason, elapsed_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +334,102 @@ def _safe_call(fn: Callable[[], Any], label: str) -> Optional[Any]:
     except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, f"{label} failed")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Suggested-questions helpers (V1 Daily-Use spec §5 Move 3)
+# ---------------------------------------------------------------------------
+
+
+def _personas_for_suggestions(session: ResearchSession) -> List[Dict[str, Any]]:
+    """Best-effort pull of personas for the session — used as LLM input
+    grounding for the suggested-questions generator. Returns an empty list
+    on any failure; the generator handles the empty case."""
+    try:
+        from src.db.session import SessionLocal
+        from src.db.models import Persona
+    except Exception:  # noqa: BLE001
+        return []
+    if SessionLocal is None:
+        return []
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Persona)
+            .filter(Persona.session_id == session.session_id)
+            .all()
+        )
+        return [
+            {
+                "first_name": getattr(r, "first_name", None),
+                "last_name": getattr(r, "last_name", None),
+                "title": getattr(r, "title", None),
+                "persona_type": getattr(r, "persona_type", None),
+            }
+            for r in rows
+        ]
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[runner] persona load for suggestions failed"
+        )
+        return []
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _log_suggested_questions_event(
+    session: ResearchSession,
+    reason: str,
+    elapsed_seconds: float,
+) -> None:
+    """Persist a `WorkflowEvent` row for suggested-questions degradation.
+
+    Reasons:
+      - ``slow``     — generator returned within budget but exceeded 5s wall.
+      - ``fallback`` — generator returned the generic fallback list.
+      - ``raised``   — caller-side exception.
+
+    Never raises; DB failures are logged type-only.
+    """
+    try:
+        from src.db.session import SessionLocal
+        from src.db.models import WorkflowEvent
+    except Exception:  # noqa: BLE001
+        return
+    if SessionLocal is None:
+        return
+
+    if reason == "slow":
+        event_type = "suggested_questions_slow"
+    else:
+        event_type = "suggested_questions_failed"
+
+    db = SessionLocal()
+    try:
+        evt = WorkflowEvent(
+            event_type=event_type,
+            session_id=getattr(session, "session_id", None),
+            rep_id=getattr(session, "rep_id", None),
+            payload={
+                "reason": reason,
+                "elapsed_ms": int(elapsed_seconds * 1000),
+            },
+        )
+        db.add(evt)
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[runner] failed to log suggested_questions event"
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
