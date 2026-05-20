@@ -154,13 +154,38 @@ def _render_list(items: Optional[Iterable[Any]]) -> str:
 
 
 def _strip_fences(raw: str) -> str:
-    """Best-effort strip of ```json fences if the LLM ignored the rule."""
+    """Pull a JSON array out of an LLM response, even with prose around it.
+
+    Production reality: Haiku 4.5 frequently wraps the array in either
+    ```json fences, a "Here are your questions:" preamble, or trailing
+    explanatory text. Strict fence-stripping rejected all three. This
+    version locates the first '[' and the last ']' and trusts json.loads
+    to validate. Falls back to the raw string if no brackets found.
+    """
     raw = (raw or "").strip()
+    if not raw:
+        return raw
+
+    # Fast path: clean JSON array.
+    if raw.startswith("[") and raw.endswith("]"):
+        return raw
+
+    # Strip ```json / ``` fences if present.
     if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.rsplit("```", 1)[0]
+        try:
+            raw = raw.split("```", 2)[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+        except IndexError:
+            pass
+
+    # Locate the JSON array boundaries — handles prose preamble/postamble.
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return raw[start : end + 1].strip()
     return raw.strip()
 
 

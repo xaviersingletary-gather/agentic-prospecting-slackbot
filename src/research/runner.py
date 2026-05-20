@@ -28,7 +28,7 @@ from src.agents.suggested_questions import (
     generate_suggested_questions,
     is_fallback,
 )
-from src.integrations.slack_blocks import suggested_questions_block
+from src.integrations.slack_blocks import suggested_questions_block, validate_blocks
 from src.memory.blocks import build_new_since_blocks
 from src.memory.diff import diff_findings
 from src.memory.snapshots import get_latest_snapshot, save_snapshot
@@ -52,6 +52,60 @@ from src.integrations.hubspot.account_snapshot import (
     build_account_snapshot_blocks,
     get_account_snapshot,
 )
+
+
+def _persist_company_research(
+    session: "ResearchSession", findings: Dict[str, Any]
+) -> None:
+    """Write/upsert a CompanyResearch row for the session.
+
+    Used by the V1 daily-use flow so follow-up Q&A (Phase 5) can find the
+    research artifacts via Session.id. Keeps the schema mapping close to
+    the findings dict; defensive against missing keys.
+    """
+    from src.db.session import SessionLocal
+    from src.db.models import CompanyResearch
+    import uuid
+
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(CompanyResearch)
+            .filter(CompanyResearch.session_id == session.session_id)
+            .order_by(CompanyResearch.created_at.desc())
+            .first()
+        )
+        if existing is not None:
+            # Idempotent: refresh fields on the latest row for this session.
+            existing.account_name = findings.get("account_name") or session.account_name
+            existing.facility_count = findings.get("facility_count")
+            existing.facility_count_note = findings.get("facility_count_note")
+            existing.board_initiatives = findings.get("board_initiatives", []) or []
+            existing.company_priorities = findings.get("company_priorities", []) or []
+            existing.trigger_events = findings.get("trigger_events", []) or []
+            existing.automation_vendors = findings.get("automation_vendors", []) or []
+            existing.exception_tax = findings.get("exception_tax")
+            existing.research_gaps = findings.get("research_gaps", []) or []
+            existing.raw_research_text = findings.get("raw_research_text", "") or ""
+        else:
+            row = CompanyResearch(
+                id=str(uuid.uuid4()),
+                session_id=session.session_id,
+                account_name=findings.get("account_name") or session.account_name,
+                facility_count=findings.get("facility_count"),
+                facility_count_note=findings.get("facility_count_note"),
+                board_initiatives=findings.get("board_initiatives", []) or [],
+                company_priorities=findings.get("company_priorities", []) or [],
+                trigger_events=findings.get("trigger_events", []) or [],
+                automation_vendors=findings.get("automation_vendors", []) or [],
+                exception_tax=findings.get("exception_tax"),
+                research_gaps=findings.get("research_gaps", []) or [],
+                raw_research_text=findings.get("raw_research_text", "") or "",
+            )
+            db.add(row)
+        db.commit()
+    finally:
+        db.close()
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +169,7 @@ def run_account_research(
 
     try:
         post(
-            blocks=blocks,
+            blocks=validate_blocks(blocks),
             text=f"Research for {session.account_name}",
         )
     except Exception as e:  # noqa: BLE001
@@ -238,6 +292,15 @@ def _build_account_blocks(
     # Also stash on the dataclass directly so callers holding the
     # session reference (e.g. tests, legacy run_research) can read it.
     session.findings = findings
+
+    # Persist a CompanyResearch row so the follow-up Q&A handler can find
+    # the artifacts later. Best-effort; failure here must not block the
+    # brief. (Without this, @-mentions in the thread return "I'm still
+    # finishing the initial research" because the DB has no row.)
+    try:
+        _persist_company_research(session, findings)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "persist_company_research failed")
 
     new_since_blocks: List[Dict[str, Any]] = []
     if prev_snapshot is not None:

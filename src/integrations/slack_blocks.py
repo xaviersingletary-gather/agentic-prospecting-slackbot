@@ -1,6 +1,46 @@
+import logging
 from typing import Any, Dict, List, Optional
 
 from src.security.safe_mrkdwn import safe_mrkdwn
+
+logger = logging.getLogger(__name__)
+
+
+def validate_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Enforce Slack's per-message uniqueness rule on `action_id` values.
+
+    Slack rejects any chat.postMessage whose blocks contain two elements
+    sharing an action_id ("invalid_blocks"). The whole brief silently fails
+    to render. We've been bitten by this twice; this helper catches it
+    pre-flight by rewriting duplicates with numeric suffixes so the post
+    succeeds. Returns the (possibly fixed-up) blocks. Logs any rewrite so
+    the underlying code can be cleaned up at leisure.
+    """
+    seen: Dict[str, int] = {}
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        elements = block.get("elements") or []
+        if not isinstance(elements, list):
+            continue
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+            aid = el.get("action_id")
+            if not aid:
+                continue
+            if aid in seen:
+                seen[aid] += 1
+                new_aid = f"{aid}__{seen[aid]}"
+                logger.warning(
+                    "[validate_blocks] duplicate action_id rewritten: %s -> %s",
+                    aid,
+                    new_aid,
+                )
+                el["action_id"] = new_aid
+            else:
+                seen[aid] = 0
+    return blocks
 
 
 # ---------------------------------------------------------------------------
