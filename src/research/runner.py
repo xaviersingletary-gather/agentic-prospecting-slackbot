@@ -110,6 +110,121 @@ def _persist_company_research(
 logger = logging.getLogger(__name__)
 
 
+# Phase 17 — intent-driven auto-trigger for Stage 2.
+# Intents in this set get HubSpot + Apollo contact discovery fired
+# automatically alongside Stage 1. `just_digging` is intentionally
+# excluded — pure research mode, lazy-fetch on demand only.
+CONTACT_INTENTS = frozenset({"outbound", "pre_call", "renewal"})
+
+# Default persona set used when the rep hasn't selected personas
+# but the intent type implies contacts are needed.
+DEFAULT_PERSONAS = (
+    "technical_lead",
+    "operations_lead",
+    "executive",
+    "compliance_lead",
+)
+
+# Maps the persona keys used by the runner / Apollo title filter to the
+# `persona_type` short codes the DB Persona model expects.
+_PERSONA_KEY_TO_TYPE = {
+    "technical_lead": "TDM",
+    "operations_lead": "ODM",
+    "executive": "ExSp",
+    "compliance_lead": "IT",
+}
+
+
+def _persist_personas_from_tag_result(
+    session: "ResearchSession", tag_result: Dict[str, Any]
+) -> int:
+    """Upsert Persona rows from a Stage 2 `tag_result.contacts` list.
+
+    Idempotent within a session: keyed on (session_id, apollo_id) when
+    apollo_id exists, else (session_id, email). Used by the V1 daily-use
+    flow so the follow-up Q&A handler can answer contact-flavored
+    questions ("who should I hit first?") off of saved Persona rows
+    rather than re-firing Apollo on every question.
+
+    Returns the row-touch count. Never raises.
+    """
+    from src.db.session import SessionLocal
+    from src.db.models import Persona
+    from src.research.personas import PERSONAS as _PERSONAS
+    import uuid
+
+    contacts = (tag_result or {}).get("contacts") or []
+    if not contacts:
+        return 0
+
+    persona_keys = list(session.personas or DEFAULT_PERSONAS)
+    valid_keys = [k for k in persona_keys if k in _PERSONAS]
+
+    def _classify(title: str) -> Optional[str]:
+        """Pick the first persona whose `title_keywords` substring-match the
+        contact title (case-insensitive). Returns the persona_type short
+        code or None when nothing matches.
+        """
+        t = (title or "").lower()
+        if not t:
+            return None
+        for k in valid_keys:
+            cfg = _PERSONAS.get(k) or {}
+            for kw in cfg.get("title_keywords") or []:
+                if kw.lower() in t:
+                    return _PERSONA_KEY_TO_TYPE.get(k)
+        return None
+
+    db = SessionLocal()
+    touched = 0
+    try:
+        for c in contacts:
+            apollo_id = c.get("apollo_id")
+            email = (c.get("email") or "").strip() or None
+            title = (c.get("title") or "").strip()
+
+            q = db.query(Persona).filter(
+                Persona.session_id == session.session_id
+            )
+            row = None
+            if apollo_id:
+                row = q.filter(Persona.apollo_id == apollo_id).first()
+            if row is None and email:
+                row = q.filter(Persona.email == email).first()
+
+            persona_type = _classify(title)
+
+            fields = {
+                "session_id": session.session_id,
+                "apollo_id": apollo_id,
+                "first_name": (c.get("first_name") or "").strip(),
+                "last_name": (c.get("last_name") or "").strip(),
+                "title": title,
+                "email": email,
+                "linkedin_url": c.get("linkedin_url") or None,
+                "account_name": session.account_name,
+                "persona_type": persona_type,
+                "status": "discovered",
+            }
+            if row is None:
+                row = Persona(id=str(uuid.uuid4()), **fields)
+                db.add(row)
+            else:
+                for k, v in fields.items():
+                    setattr(row, k, v)
+            touched += 1
+        db.commit()
+        return touched
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "persist_personas_from_tag_result failed"
+        )
+        db.rollback()
+        return 0
+    finally:
+        db.close()
+
+
 def build_placeholder_findings(session: ResearchSession) -> Dict[str, Any]:
     """Deprecated alias. Delegates to `build_findings`."""
     return build_findings(session)
@@ -346,6 +461,16 @@ def _build_persona_blocks(
     except Exception as e:  # noqa: BLE001
         safe_log_exception(logger, e, "build_tagged_contacts raised")
         tag_result = {"contacts": [], "warning": "Contact pipeline failed"}
+
+    # Persist Persona rows so the V1 follow-up Q&A handler can answer
+    # contact-flavored questions off the DB instead of returning
+    # "No contacts available". Idempotent; safe to call on every Stage 2.
+    try:
+        _persist_personas_from_tag_result(session, tag_result)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "persist personas after tagging failed"
+        )
 
     snapshot_blocks: List[Dict[str, Any]] = []
     snap = None

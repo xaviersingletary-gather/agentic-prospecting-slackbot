@@ -41,12 +41,137 @@ _RATE_LIMIT_PER_REP = 100
 _RATE_LIMIT_WINDOW_HOURS = 24
 
 _THINKING_PLACEHOLDER = "_…thinking…_"
+_PULLING_CONTACTS_PLACEHOLDER = "🔎 Pulling contacts from HubSpot + Apollo…"
 _RATE_LIMIT_MSG = (
     "_You've hit the follow-up rate limit for this thread. "
     "Try again later._"
 )
 _CANCELLED_MSG = "_This session was cancelled. Start a new research request to ask follow-ups._"
 _RESEARCH_RUNNING_MSG = "_I'm still finishing the initial research. Ask again in a minute._"
+
+# Phase 17 — keywords that imply the question needs contact-level data.
+# Heuristic only — cheap, no LLM call. The cost of a false positive is
+# one Apollo lookup; the cost of a false negative is a degraded answer.
+_CONTACT_QUESTION_KEYWORDS = (
+    "who",
+    "contact",
+    "person",
+    "people",
+    "title",
+    "linkedin",
+    "email",
+    "reach out",
+    "reach-out",
+    "champion",
+    "stakeholder",
+    "hit first",
+    "talk to",
+    "decision maker",
+    "decision-maker",
+    "buyer",
+    "owner",
+    "engage",
+    "introduce",
+)
+
+
+def _is_contact_question(question: str) -> bool:
+    """Cheap heuristic: does this question need contact data on file?
+
+    Returns True if any keyword in `_CONTACT_QUESTION_KEYWORDS` appears
+    in the question (case-insensitive). Intended for use ONLY when
+    `Persona` rows are empty — a hit triggers a lazy HubSpot + Apollo
+    fetch before answering.
+    """
+    q = (question or "").lower()
+    if not q:
+        return False
+    return any(k in q for k in _CONTACT_QUESTION_KEYWORDS)
+
+
+def _lazy_fetch_contacts(
+    session_row: Any,
+    client: Any,
+    channel: str,
+    placeholder_ts: Optional[str],
+    thread_ts: str,
+) -> int:
+    """Fire the HubSpot + Apollo contact pipeline inline for `session_row`.
+
+    Used when a follow-up question implies contact data but `Persona`
+    rows are empty for the session (e.g., rep picked `just_digging`
+    intent so Stage 2 never auto-ran). Edits the placeholder to a
+    status line during the call. Persists Persona rows via
+    `_persist_personas_from_tag_result`. Never raises.
+
+    Returns the number of Persona rows written/touched.
+    """
+    from src.research.clients_factory import (
+        get_apollo_client,
+        get_hubspot_contact_client,
+        get_hubspot_portal_id,
+    )
+    from src.research.contact_pipeline import build_tagged_contacts
+    from src.research.runner import (
+        DEFAULT_PERSONAS,
+        _persist_personas_from_tag_result,
+    )
+    from src.research.sessions import ResearchSession
+
+    # Status placeholder while we hit Apollo + HubSpot.
+    try:
+        _post_or_update(
+            client, channel, placeholder_ts, thread_ts,
+            text=_PULLING_CONTACTS_PLACEHOLDER,
+        )
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[followup_qa] lazy_fetch placeholder edit failed"
+        )
+
+    sess = ResearchSession(
+        session_id=session_row.id,
+        rep_id=session_row.rep_id,
+        account_name=session_row.account_name,
+    )
+    sess.personas = list(DEFAULT_PERSONAS)
+
+    apollo_client = None
+    hs_contact_client = None
+    portal_id = None
+    try:
+        apollo_client = get_apollo_client()
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "[followup_qa] apollo client init failed")
+    try:
+        hs_contact_client = get_hubspot_contact_client()
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "[followup_qa] hubspot client init failed")
+    try:
+        portal_id = get_hubspot_portal_id()
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(logger, e, "[followup_qa] hubspot portal id read failed")
+
+    try:
+        tag_result = build_tagged_contacts(
+            sess,
+            apollo_client=apollo_client,
+            hubspot_contact_client=hs_contact_client,
+            portal_id=portal_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[followup_qa] lazy_fetch build_tagged_contacts raised"
+        )
+        return 0
+
+    try:
+        return _persist_personas_from_tag_result(sess, tag_result)
+    except Exception as e:  # noqa: BLE001
+        safe_log_exception(
+            logger, e, "[followup_qa] lazy_fetch persist failed"
+        )
+        return 0
 
 
 def get_bot_user_id(client: Any) -> Optional[str]:
@@ -418,6 +543,32 @@ def handle_followup(
             .filter(Persona.session_id == session_row.id)
             .all()
         )
+
+        # Phase 17 — lazy contact fetch. If the rep picked `just_digging`
+        # at intent capture, Stage 2 never auto-ran and `personas` is
+        # empty. When the follow-up question implies contacts, fire the
+        # HubSpot + Apollo pipeline inline, persist, and reload.
+        if not personas and _is_contact_question(bare_question):
+            count = _lazy_fetch_contacts(
+                session_row, client, channel, placeholder_ts, thread_ts
+            )
+            if count:
+                personas = (
+                    db.query(Persona)
+                    .filter(Persona.session_id == session_row.id)
+                    .all()
+                )
+                try:
+                    _post_or_update(
+                        client, channel, placeholder_ts, thread_ts,
+                        text=_THINKING_PLACEHOLDER,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    safe_log_exception(
+                        logger, e,
+                        "[followup_qa] thinking-restore after lazy_fetch failed",
+                    )
+
         contact_researches = (
             db.query(ContactResearch)
             .filter(ContactResearch.session_id == session_row.id)

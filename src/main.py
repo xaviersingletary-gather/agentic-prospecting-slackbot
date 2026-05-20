@@ -136,7 +136,12 @@ from src.handlers.diff_front_door import (
 from src.handlers.suggested_question_click import (
     handle_suggested_question as _v1_handle_suggested_question,
 )
-from src.research.runner import run_account_research as _v1_run_account_research
+from src.research.runner import (
+    CONTACT_INTENTS as _V1_CONTACT_INTENTS,
+    DEFAULT_PERSONAS as _V1_DEFAULT_PERSONAS,
+    run_account_research as _v1_run_account_research,
+    run_persona_research as _v1_run_persona_research,
+)
 from src.research.sessions import (
     create_session as _v1_create_session,
     get_session as _v1_get_session,
@@ -358,6 +363,25 @@ def _v1_action_intent_type(ack, body, say, client):
         _v1_run_account_research(sess, threaded_say)
     except Exception as e:  # noqa: BLE001
         logger.warning("[intent_type] run_account_research failed: %s", type(e).__name__)
+
+    # Phase 17 — auto-trigger Stage 2 (HubSpot + Apollo contact pull)
+    # for contact-oriented intents. `just_digging` skips this; the
+    # follow-up Q&A handler will lazy-fetch contacts on demand instead.
+    if intent_value in _V1_CONTACT_INTENTS:
+        if not sess.personas:
+            sess.personas = list(_V1_DEFAULT_PERSONAS)
+        try:
+            threaded_say(text="🔎 Pulling contacts from HubSpot + Apollo…")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[intent_type] contact-status post failed: %s", type(e).__name__
+            )
+        try:
+            _v1_run_persona_research(sess, threaded_say)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[intent_type] run_persona_research failed: %s", type(e).__name__
+            )
 
 
 @app.message()
