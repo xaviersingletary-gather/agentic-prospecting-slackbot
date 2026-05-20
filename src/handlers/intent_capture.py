@@ -249,7 +249,7 @@ def intent_capture_card(
         intent_buttons.append({
             "type": "button",
             "text": {"type": "plain_text", "text": label},
-            "action_id": "intent_type",
+            "action_id": f"intent_type_{value_suffix}",
             "value": f"{session_id}::{value_suffix}",
         })
 

@@ -337,7 +337,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
 
     # Intent card should be on screen — disambig + 4 intent buttons.
     posted_ids = _collect_action_ids(say)
-    assert "intent_type" in posted_ids
+    assert any(aid.startswith("intent_type_") for aid in posted_ids)
     assert "intent_disambig" in posted_ids
 
     # Pull the session_id off the intent-card value payload.
@@ -346,7 +346,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
         for b in (call.kwargs.get("blocks") or []):
             if b.get("type") == "actions":
                 for el in b.get("elements", []):
-                    if el.get("action_id") == "intent_type":
+                    if (el.get("action_id") or "").startswith("intent_type_"):
                         session_id = el.get("value", "").split("::", 1)[0]
                         break
         if session_id:

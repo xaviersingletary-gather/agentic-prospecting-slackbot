@@ -292,7 +292,7 @@ def _v1_action_intent_disambig(ack, body, say, client):
             db.close()
 
 
-@app.action("intent_type")
+@app.action(re.compile(r"^intent_type_.+$"))
 def _v1_action_intent_type(ack, body, say, client):
     """Persist intent + fire `run_account_research` (spec §5 Move 1)."""
     ack()

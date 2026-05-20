@@ -253,7 +253,7 @@ def _collect_intent_buttons(blocks):
     for b in blocks:
         if b.get("type") == "actions":
             for el in b.get("elements", []):
-                if el.get("action_id") == "intent_type":
+                if (el.get("action_id") or "").startswith("intent_type_"):
                     out.append(el)
     return out
 
@@ -301,7 +301,7 @@ def test_handle_research_dm_posts_intent_card_when_no_snapshot(mocker, patched_d
         for b in blocks:
             if b.get("type") == "actions":
                 for el in b.get("elements", []):
-                    if el.get("action_id") == "intent_type":
+                    if (el.get("action_id") or "").startswith("intent_type_"):
                         posted_action_ids.add(el.get("value", "").split("::", 1)[-1])
     assert {"outbound", "pre_call", "renewal", "just_digging"} <= posted_action_ids
 
