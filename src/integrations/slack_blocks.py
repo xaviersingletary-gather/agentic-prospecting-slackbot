@@ -1018,7 +1018,7 @@ def suggested_questions_block(questions: List[str]) -> List[Dict[str, Any]]:
         return []
 
     elements: List[Dict[str, Any]] = []
-    for q in questions:
+    for idx, q in enumerate(questions):
         if not isinstance(q, str) or not q.strip():
             continue
         cleaned = q.strip()
@@ -1026,11 +1026,13 @@ def suggested_questions_block(questions: List[str]) -> List[Dict[str, Any]]:
         # we don't need safe_mrkdwn. Truncate for the 75-char Slack cap.
         button_text = _truncate(cleaned, _BUTTON_TEXT_CAP)
         button_value = cleaned[:_BUTTON_VALUE_CAP]
+        # Slack rejects duplicate action_ids within a single message; suffix
+        # each button so they're unique. Handler in main.py matches the prefix.
         elements.append(
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": button_text},
-                "action_id": "suggested_question",
+                "action_id": f"suggested_question_{idx}",
                 "value": button_value,
             }
         )

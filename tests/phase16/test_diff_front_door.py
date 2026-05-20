@@ -264,7 +264,7 @@ def test_handle_research_dm_runs_research_on_stale_snapshot(mocker, patched_db):
                     aid = el.get("action_id")
                     if aid:
                         posted_action_ids.add(aid)
-    assert "intent_type" in posted_action_ids
+    assert any(aid.startswith("intent_type_") for aid in posted_action_ids)
     assert "re_research" not in posted_action_ids
 
 

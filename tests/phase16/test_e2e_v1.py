@@ -383,7 +383,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
 
     # Brief was posted: suggested_question action block must appear.
     final_ids = _collect_action_ids(say)
-    assert "suggested_question" in final_ids
+    assert any(aid.startswith("suggested_question_") for aid in final_ids)
 
     # Intent reached the prompt: outbound emphasis stanza in system msg.
     assert "kwargs" in captured
@@ -680,7 +680,7 @@ def test_e2e_suggested_question_click_equals_typed_question(
         ack=MagicMock(),
         body={
             "actions": [
-                {"value": question, "action_id": "suggested_question"},
+                {"value": question, "action_id": "suggested_question_0"},
             ],
             "user": {"id": "U_REP_4"},
             "channel": {"id": "D_CHAN_1"},

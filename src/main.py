@@ -231,7 +231,7 @@ def _v1_action_dig_into_new(ack, body, say, client):
     _v1_dig_into_new(session_id, channel_id, thread_ts, client, say)
 
 
-@app.action("suggested_question")
+@app.action(re.compile(r"^suggested_question_\d+$"))
 def _v1_action_suggested_question(ack, body, client):
     """V1 Daily-Use spec §5 Move 3 — click a suggested-question chip
     appended to the brief; routes through `handle_followup` (Phase 5)."""

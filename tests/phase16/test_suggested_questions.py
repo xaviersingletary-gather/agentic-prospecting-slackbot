@@ -276,8 +276,12 @@ def test_block_action_ids_are_suggested_question():
 
     questions = ["q1", "q2", "q3", "q4"]
     blocks = suggested_questions_block(questions)
+    seen_ids = set()
     for el in blocks[0]["elements"]:
-        assert el["action_id"] == "suggested_question"
+        aid = el["action_id"]
+        assert aid.startswith("suggested_question_")
+        assert aid not in seen_ids, "action_ids must be unique (Slack rejects dupes)"
+        seen_ids.add(aid)
         assert el["type"] == "button"
 
 
@@ -331,7 +335,7 @@ def test_brief_includes_suggested_questions_block(mocker, patched_db):
         b for b in blocks
         if b.get("type") == "actions"
         and any(
-            el.get("action_id") == "suggested_question"
+            (el.get("action_id") or "").startswith("suggested_question_")
             for el in b.get("elements", [])
         )
     ]
@@ -375,7 +379,7 @@ def test_brief_ships_without_block_if_generator_fails(mocker, patched_db):
     for b in posted["blocks"]:
         if b.get("type") == "actions":
             for el in b.get("elements", []):
-                assert el.get("action_id") != "suggested_question"
+                assert not (el.get("action_id") or "").startswith("suggested_question_")
 
     # `suggested_questions_failed` event landed.
     db = patched_db()
@@ -398,7 +402,7 @@ def test_brief_ships_without_block_if_generator_fails(mocker, patched_db):
 def _click_body(question="Sarah Chen — angle?", user_id="U_REP",
                 channel_id="D_CHAN_1", thread_ts="1700000000.0001"):
     return {
-        "actions": [{"value": question, "action_id": "suggested_question"}],
+        "actions": [{"value": question, "action_id": "suggested_question_0"}],
         "user": {"id": user_id},
         "channel": {"id": channel_id},
         "message": {"ts": thread_ts, "thread_ts": thread_ts},
