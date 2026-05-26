@@ -264,6 +264,112 @@ def _v1_action_ask_specific(ack, body, say, client):
 # Intent capture buttons (V1 Daily-Use spec §5 Move 1)
 # ---------------------------------------------------------------------------
 
+@app.action("icp_override_proceed")
+def _v1_action_icp_override_proceed(ack, body, say, client):
+    """Rep clicked "Research anyway" on the ICP override card.
+
+    Behaves identically to a normal new-query flow from this point: look
+    up the DB Session, then post the intent-capture card with disambig
+    options (if any). Research does NOT start here — fires only when the
+    rep clicks an intent button.
+    """
+    ack()
+    try:
+        raw_value = body["actions"][0]["value"]
+        session_id, _ = raw_value.split("::", 1)
+        thread_ts = body.get("message", {}).get("ts")
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        logger.warning(
+            "[icp_override_proceed] malformed payload: %s", type(e).__name__
+        )
+        return
+
+    # Local imports — these modules pull in httpx / OpenRouter and have no
+    # need to be loaded at module-import time for tests that don't exercise
+    # the override path.
+    from src.handlers.intent_capture import (
+        intent_capture_card,
+        is_account_ambiguous,
+    )
+
+    account_name = None
+    db = None
+    try:
+        db = SessionLocal()
+        db_session = db.query(Session).filter(Session.id == session_id).first()
+        if db_session is None:
+            say(
+                text="That research request expired. Send the account name again to start over.",
+                thread_ts=thread_ts,
+            )
+            return
+        account_name = db_session.account_name
+        normalized = dict(db_session.normalized_request or {})
+        normalized["icp_override"] = True
+        db_session.normalized_request = normalized
+        flag_modified(db_session, "normalized_request")
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[icp_override_proceed] DB write failed: %s", type(e).__name__
+        )
+        return
+    finally:
+        if db is not None:
+            db.close()
+
+    log_event(session_id, "icp_overridden", 1, body.get("user", {}).get("id", ""), {})
+
+    disambig_options = is_account_ambiguous(account_name or "")
+    say(
+        blocks=intent_capture_card(
+            account_name=account_name or "",
+            disambiguation_options=disambig_options,
+            session_id=session_id,
+        ),
+        text=f"Quick check before I research {account_name}.",
+        thread_ts=thread_ts,
+    )
+
+
+@app.action("icp_override_cancel")
+def _v1_action_icp_override_cancel(ack, body, say, client):
+    """Rep clicked "Never mind" on the ICP override card.
+
+    Mark the Session cancelled and post a one-line acknowledgement so
+    the rep knows nothing is running.
+    """
+    ack()
+    try:
+        raw_value = body["actions"][0]["value"]
+        session_id, _ = raw_value.split("::", 1)
+        thread_ts = body.get("message", {}).get("ts")
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        logger.warning(
+            "[icp_override_cancel] malformed payload: %s", type(e).__name__
+        )
+        return
+
+    db = None
+    try:
+        db = SessionLocal()
+        db_session = db.query(Session).filter(Session.id == session_id).first()
+        if db_session is not None:
+            db_session.status = "cancelled"
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[icp_override_cancel] DB write failed: %s", type(e).__name__
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+    log_event(session_id, "icp_declined", 1, body.get("user", {}).get("id", ""), {})
+
+    say(text="Got it — skipped.", thread_ts=thread_ts)
+
+
 @app.action("intent_disambig")
 def _v1_action_intent_disambig(ack, body, say, client):
     """Persist a disambiguation selection without firing research.
