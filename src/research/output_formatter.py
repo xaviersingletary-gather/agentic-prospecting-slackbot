@@ -31,6 +31,12 @@ from src.utils.citation_validator import (
 NO_DATA = "No public data found"
 DC_NO_DATA = "Could not confirm DC count from public sources"
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Provenance glyphs — used to label every claim so reps know what to
+# trust verbatim, what to hedge, and what to ask in discovery.
+PROV_SOURCED = "✅ Sourced"
+PROV_INFERRED = "🔍 Inferred"
+PROV_NOT_FOUND = "❌ Not found"
 # Capped at 4 to keep total Block Kit count under Slack's 50-block hard
 # limit on a single message: each claim emits 2 blocks (section + context),
 # 4 sections × 4 claims × 2 = 32 blocks + 4 section headers + 1 main
@@ -71,24 +77,71 @@ def _safe_url_link(url: str) -> str:
         return safe_mrkdwn(url)
 
 
-def _render_fact_bullet(item: Dict[str, str], *, is_dc: bool) -> Optional[str]:
+def _provenance_of(item: Dict[str, Any]) -> str:
+    """Resolve provenance from an item dict.
+
+    Items emitted by the new sanitizer always carry an explicit
+    `provenance`. Items from legacy paths (or older snapshots) don't;
+    fall back to "sourced" when a URL is present so old data still
+    renders correctly.
+    """
+    p = (item.get("provenance") or "").strip().lower()
+    if p in ("sourced", "inferred", "not_found"):
+        return p
+    if (item.get("source_url") or "").strip():
+        return "sourced"
+    return ""
+
+
+def _render_fact_bullet(item: Dict[str, Any], *, is_dc: bool) -> Optional[str]:
     """Return a rendered bullet, or None if the item must be dropped.
 
-    DC intel items without a source URL are dropped (spec §1.4 — DC counts
-    must never appear unsourced). Other unsourced facts are flagged with
-    `⚠️ [Unverified]` instead of being dropped.
+    Branches on provenance:
+      - sourced  → `•  ✅ Sourced — claim  ·  <url|domain>`
+      - inferred → `•  🔍 Inferred — claim  ·  basis`  (no source line)
+      - not_found→ `•  ❌ Not found — label  ·  discovery_question`
+
+    DC intel items without a sourced URL are still dropped if they look
+    like a DC count claim (spec §1.4). "not_found" entries are always
+    allowed because they explicitly admit the gap.
     """
+    provenance = _provenance_of(item)
+
+    if provenance == "not_found":
+        label = safe_mrkdwn(item.get("label", "") or item.get("claim", ""))
+        question = safe_mrkdwn(item.get("discovery_question", ""))
+        if not label:
+            return None
+        if question:
+            return f"•  *{PROV_NOT_FOUND}* — {label}  ·  _ask: {question}_"
+        return f"•  *{PROV_NOT_FOUND}* — {label}"
+
+    if provenance == "inferred":
+        claim = safe_mrkdwn(item.get("claim", ""))
+        basis = safe_mrkdwn(item.get("inference_basis", ""))
+        if not claim:
+            return None
+        if is_dc and is_unsourced_dc_count(claim):
+            # DC counts must never be presented as inferences either.
+            return None
+        if basis:
+            return f"•  *{PROV_INFERRED}* — {claim}  ·  _basis: {basis}_"
+        return f"•  *{PROV_INFERRED}* — {claim}"
+
     claim = safe_mrkdwn(item.get("claim", ""))
     url_raw = (item.get("source_url") or "").strip()
     if claim and url_raw:
-        return f"•  {claim}  ·  {_safe_url_link(url_raw)}"
+        date = safe_mrkdwn((item.get("source_date") or "").strip())
+        tail = f"  ·  {_safe_url_link(url_raw)}"
+        if date:
+            tail += f"  ·  {date}"
+        return f"•  *{PROV_SOURCED}* — {claim}{tail}"
     if not claim:
         return None
-    # Unsourced claim from here on
+    # Unsourced legacy claim from here on
     if is_dc and is_unsourced_dc_count(claim):
         return None
     if is_dc:
-        # Even non-DC-count items inside the DC section are risky; drop unsourced.
         return None
     return f"•  {UNVERIFIED_PREFIX} — {claim}"
 
@@ -139,7 +192,7 @@ def format_research_output(findings: Dict[str, Any]) -> str:
 
 
 def _render_fact_card(
-    item: Dict[str, str], *, is_dc: bool
+    item: Dict[str, Any], *, is_dc: bool
 ) -> Optional[List[Dict[str, Any]]]:
     """Per-claim Block Kit card.
 
@@ -147,35 +200,99 @@ def _render_fact_card(
     None when the claim must be dropped per spec §1.4 (unsourced DC
     claim).
 
-    Layout:
-      • {claim}                           ← section block (mrkdwn)
-        ↳ {domain}                        ← context block (smaller text)
+    Layout (sourced):
+      •  ✅ Sourced — {claim}              ← section block (mrkdwn)
+        ↳  {domain}  ·  {date}             ← context block (smaller text)
+
+    Layout (inferred):
+      •  🔍 Inferred — {claim}             ← section block
+        ↳  basis: {inference_basis}        ← context block
+
+    Layout (not_found):
+      •  ❌ Not found — {label}             ← section block
+        ↳  ask: {discovery_question}       ← context block
     """
+    provenance = _provenance_of(item)
+
+    if provenance == "not_found":
+        label = safe_mrkdwn(item.get("label", "") or item.get("claim", ""))
+        question = safe_mrkdwn(item.get("discovery_question", ""))
+        if not label:
+            return None
+        blocks: List[Dict[str, Any]] = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"•  *{PROV_NOT_FOUND}* — {label}",
+                },
+            }
+        ]
+        if question:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"  ↳  _ask: {question}_"}
+                    ],
+                }
+            )
+        return blocks
+
+    if provenance == "inferred":
+        claim = safe_mrkdwn(item.get("claim", ""))
+        basis = safe_mrkdwn(item.get("inference_basis", ""))
+        if not claim:
+            return None
+        if is_dc and is_unsourced_dc_count(claim):
+            return None
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"•  *{PROV_INFERRED}* — {claim}",
+                },
+            }
+        ]
+        if basis:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"  ↳  _basis: {basis}_"}
+                    ],
+                }
+            )
+        return blocks
+
     claim = safe_mrkdwn(item.get("claim", ""))
     url_raw = (item.get("source_url") or "").strip()
 
     if claim and url_raw:
+        date = safe_mrkdwn((item.get("source_date") or "").strip())
+        ctx = f"  ↳  {_safe_url_link(url_raw)}"
+        if date:
+            ctx += f"  ·  {date}"
         return [
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"•  {claim}"},
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"•  *{PROV_SOURCED}* — {claim}",
+                },
             },
             {
                 "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"  ↳  {_safe_url_link(url_raw)}"}
-                ],
+                "elements": [{"type": "mrkdwn", "text": ctx}],
             },
         ]
     if not claim:
         return None
-    # Unsourced claim from here on
     if is_dc and is_unsourced_dc_count(claim):
         return None
     if is_dc:
-        # Even non-DC-count items inside the DC section are risky; drop unsourced.
         return None
-    # Unsourced non-DC claim — flag with the unverified prefix; no source line.
     return [
         {
             "type": "section",
