@@ -19,7 +19,16 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
-from src.agents.followup_agent import answer_followup, build_followup_context
+from src.agents.followup_agent import (
+    answer_followup,
+    build_followup_context,
+    build_followup_context_v2,
+)
+from src.research.account_research_store import (
+    append_conversation_turn,
+    get_account_research_by_thread_ts,
+    get_recent_turns,
+)
 from src.db.models import (
     CompanyResearch,
     ContactResearch,
@@ -508,19 +517,25 @@ def handle_followup(
             )
             return
 
-        # Research-in-flight: no CompanyResearch yet.
-        company_research = (
-            db.query(CompanyResearch)
-            .filter(CompanyResearch.session_id == session_row.id)
-            .order_by(CompanyResearch.created_at.desc())
-            .first()
-        )
-        if company_research is None:
-            _post_or_update(
-                client, channel, placeholder_ts, thread_ts,
-                text=_RESEARCH_RUNNING_MSG,
+        # Phase 5: prefer the new AccountResearch row. When present, we
+        # do NOT require a CompanyResearch row (the new pipeline doesn't
+        # write to that table). When absent, we fall back to the legacy
+        # CompanyResearch lookup and its "research running" guard.
+        new_blob_row = get_account_research_by_thread_ts(thread_ts)
+        company_research = None
+        if new_blob_row is None or not new_blob_row.research_blob:
+            company_research = (
+                db.query(CompanyResearch)
+                .filter(CompanyResearch.session_id == session_row.id)
+                .order_by(CompanyResearch.created_at.desc())
+                .first()
             )
-            return
+            if company_research is None:
+                _post_or_update(
+                    client, channel, placeholder_ts, thread_ts,
+                    text=_RESEARCH_RUNNING_MSG,
+                )
+                return
 
         # 4. Rate-limit gates.
         counts = _rate_limit_counts(db, session_row.id, user_id)
@@ -582,21 +597,63 @@ def handle_followup(
         )
 
         # 5. Build context → LLM → safe_mrkdwn.
+        #
+        # Phase 5 cutover: prefer the new AccountResearch blob + the
+        # ConversationTurn history. When present, that's the canonical
+        # source — agent_8_contacts already includes contact data inline,
+        # so we don't need the legacy personas/contact_researches arms.
+        # Fall back to the legacy context builder when no AccountResearch
+        # row exists yet (rep researched before the cutover landed, or
+        # the new runner failed to persist). `new_blob_row` is already
+        # populated by the lookup hoisted above the CompanyResearch gate.
         started = time.perf_counter()
         try:
-            context = build_followup_context(
-                session_row,
-                company_research,
-                personas,
-                contact_researches,
-                thread_history,
-                bare_question,
-            )
+            if new_blob_row is not None and new_blob_row.research_blob:
+                turns = get_recent_turns(thread_ts, limit=20)
+                # Persist the user's question BEFORE the LLM call so a
+                # mid-call crash doesn't lose it.
+                append_conversation_turn(
+                    thread_ts=thread_ts,
+                    role="user",
+                    message=bare_question,
+                    rep_id=user_id,
+                )
+                context = build_followup_context_v2(
+                    account_name=account_name,
+                    research_blob=new_blob_row.research_blob,
+                    turns=turns,
+                    question=bare_question,
+                )
+            else:
+                context = build_followup_context(
+                    session_row,
+                    company_research,
+                    personas,
+                    contact_researches,
+                    thread_history,
+                    bare_question,
+                )
             raw_answer = answer_followup(context)
         except Exception as e:  # noqa: BLE001
             safe_log_exception(logger, e, "[followup_qa] context/LLM failure")
             raw_answer = "_I couldn't think through that one — try again or rephrase?_"
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        # Persist the assistant turn. Only when we used the new path — the
+        # legacy path doesn't have a ConversationTurn shape and routing
+        # turns into it would mix histories. Best-effort; never raises.
+        if new_blob_row is not None and new_blob_row.research_blob:
+            try:
+                append_conversation_turn(
+                    thread_ts=thread_ts,
+                    role="assistant",
+                    message=raw_answer or "",
+                    rep_id=user_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                safe_log_exception(
+                    logger, e, "[followup_qa] append assistant turn failed"
+                )
 
         safe_answer = safe_mrkdwn(raw_answer)
         footer = (

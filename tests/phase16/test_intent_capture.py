@@ -434,10 +434,13 @@ def test_submit_intent_logs_event(mocker, patched_db):
     assert payload.get("intent_type") == "meeting_prep"
 
 
-def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db):
-    """`run_account_research` called with a ResearchSession whose
-    `normalized_request["intent_type"]` is the clicked value."""
-    mock_run = mocker.patch("src.main._v1_run_account_research")
+def test_submit_intent_fires_run_v1_research_with_intent(mocker, patched_db):
+    """Phase 5 cutover — the intent-type handler now drives the new
+    `run_v1_research_sync` pipeline. The mocked call receives the
+    captured intent + a ResearchSession carrying account_name."""
+    mock_run = mocker.patch(
+        "src.research.agents.runner_v1.run_v1_research_sync"
+    )
     _seed_db_session(patched_db, session_id="sess-i3", account_name="Sysco", rep_id="U1")
 
     from src.main import _v1_action_intent_type
@@ -448,15 +451,20 @@ def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db
         "message": {"ts": "1700002000.0001"},
         "channel": {"id": "D_CHAN_1"},
     }
-    _v1_action_intent_type(ack=MagicMock(), body=body, say=MagicMock(), client=MagicMock())
+    _v1_action_intent_type(
+        ack=MagicMock(), body=body, say=MagicMock(), client=MagicMock()
+    )
 
     mock_run.assert_called_once()
-    args, kwargs = mock_run.call_args
-    # First positional arg is the ResearchSession.
-    session = args[0] if args else kwargs.get("session")
-    assert session is not None
-    assert getattr(session, "account_name", "") == "Sysco"
-    assert (getattr(session, "normalized_request", None) or {}).get("intent_type") == "asset_building"
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["intent"] == "asset_building"
+    assert kwargs["thread_ts"] == "1700002000.0001"
+    assert kwargs["channel_id"] == "D_CHAN_1"
+    assert kwargs["rep_id"] == "U1"
+    sess = kwargs["session"]
+    assert sess is not None
+    assert sess.account_name == "Sysco"
+    assert (sess.normalized_request or {}).get("intent_type") == "asset_building"
 
 
 # ---------------------------------------------------------------------------

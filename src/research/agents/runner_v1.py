@@ -33,6 +33,11 @@ from src.research.agents.renderer import (
     chunk_blocks_for_slack,
     render_research_blocks,
 )
+from src.research.clients_factory import (
+    get_apollo_client,
+    get_hubspot_contact_client,
+    get_hubspot_portal_id,
+)
 from src.research.sessions import ResearchSession
 from src.security.exception_logger import safe_log_exception
 
@@ -63,6 +68,25 @@ async def run_v1_research(
     failure (the Slack post still happens). `post` is the threaded
     `say(**kwargs)` callable from the Slack handler.
     """
+    # Lazy-fill clients from env vars when the caller didn't inject. Tests
+    # always inject; production leaves these None and the factories read
+    # the relevant *_API_KEY / *_ACCESS_TOKEN settings.
+    if apollo_client is None:
+        try:
+            apollo_client = get_apollo_client()
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "[runner_v1] apollo factory failed")
+    if hubspot_contact_client is None:
+        try:
+            hubspot_contact_client = get_hubspot_contact_client()
+        except Exception as e:  # noqa: BLE001
+            safe_log_exception(logger, e, "[runner_v1] hubspot factory failed")
+    if hubspot_portal_id is None:
+        try:
+            hubspot_portal_id = get_hubspot_portal_id()
+        except Exception:  # noqa: BLE001 — best-effort, no log noise
+            pass
+
     inp = DispatcherInput(
         account_name=session.account_name,
         intent=intent,

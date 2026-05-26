@@ -248,6 +248,15 @@ def _collect_action_ids(say_mock):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "Legacy pipeline e2e — superseded by the May 26 V1 cutover. The "
+        "production intent-type handler now drives `run_v1_research_sync` "
+        "(Phase 21), which posts the new 8-agent rendered output rather "
+        "than the legacy single-shot brief + suggested_question buttons. "
+        "Equivalent coverage lives in tests/phase21_assembly/test_runner_v1.py."
+    )
+)
 def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
     """Spec §3 canonical flow: cold-start ambiguous account.
 
@@ -863,6 +872,14 @@ def test_e2e_no_fresh_retrieval_anywhere_in_qa_path(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "Legacy pipeline — asserted the OpenRouter prompt that the old "
+        "single-shot researcher built. The new pipeline runs 8 agents "
+        "via dispatcher; intent-emphasis propagation is now covered by "
+        "the per-agent suite under tests/phase20_agents/."
+    )
+)
 def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
     """Fire `intent_type::asset_building` → research runs → captured OpenAI
     prompt contains the literal renewal-emphasis stanza from

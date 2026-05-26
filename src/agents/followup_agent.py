@@ -36,8 +36,10 @@ _SYSTEM_STANZA = (
     "artifacts below — the account research summary, persona list, contact "
     "research, and prior thread messages. Do not invent facts, do not "
     "propose to fetch new sources, do not call tools. If the artifacts do "
-    "not contain the answer, say so explicitly. Keep responses under 200 "
-    "words unless the rep explicitly asks for more depth."
+    "not contain the answer, say so explicitly using a phrase like "
+    "'I don't have that in the research' and offer to add it next time the "
+    "rep re-runs research. Keep responses under 200 words unless the rep "
+    "explicitly asks for more depth."
 )
 
 
@@ -277,6 +279,138 @@ def build_followup_context(
             question,
         )
 
+    return context
+
+
+# ---------------------------------------------------------------------------
+# V2 context builder — reads from AccountResearch.research_blob + ConversationTurn
+# ---------------------------------------------------------------------------
+
+
+def _render_blob_section(blob: Optional[Dict[str, Any]]) -> str:
+    """Render an `AccountResearch.research_blob` into the prompt section.
+
+    The blob shape is the one `assemble_research_blob` produces — 8
+    agents in spec order, each with tagged claims. We collapse to plain
+    text grouped by section so the LLM can answer questions without
+    being distracted by JSON keys.
+    """
+    if not blob:
+        return (
+            "## Account research summary\n"
+            "  (research still in progress — no saved artifacts yet)"
+        )
+
+    lines: List[str] = ["## Account research summary"]
+    generated_at = blob.get("generated_at")
+    if generated_at:
+        lines.append(f"  Generated at: {generated_at}")
+
+    for agent in blob.get("agents") or []:
+        title = agent.get("section_title") or agent.get("agent_name") or "(untitled)"
+        lines.append(f"  {title}:")
+        claims = agent.get("claims") or []
+        if not claims:
+            lines.append("    (no findings)")
+            continue
+        for c in claims:
+            tag = c.get("source_tag", "")
+            text = c.get("text") or ""
+            extras: List[str] = []
+            if c.get("source_url"):
+                extras.append(f"url={c['source_url']}")
+            if c.get("source"):
+                extras.append(f"source={c['source']}")
+            if c.get("inference_logic"):
+                extras.append(f"basis={c['inference_logic']}")
+            if c.get("date"):
+                extras.append(f"date={c['date']}")
+            suffix = f" [{'; '.join(extras)}]" if extras else ""
+            lines.append(f"    - [{tag}] {text}{suffix}")
+    return "\n".join(lines)
+
+
+def _render_turns_section(turns: Optional[List[Any]]) -> str:
+    """Render a list of ConversationTurn rows into the prompt history.
+
+    Accepts either dataclass-like rows (with `.role`, `.message`) OR
+    plain dicts so the helper is callable from tests without spinning up
+    SQLAlchemy.
+    """
+    if not turns:
+        return "## Thread so far\n  (none — this is the first follow-up)"
+
+    lines = ["## Thread so far (oldest first)"]
+    for t in turns:
+        if isinstance(t, dict):
+            role = t.get("role", "?")
+            msg = t.get("message", "")
+        else:
+            role = getattr(t, "role", "?")
+            msg = getattr(t, "message", "")
+        lines.append(f"  [{role}] {msg}")
+    return "\n".join(lines)
+
+
+def build_followup_context_v2(
+    *,
+    account_name: str,
+    research_blob: Optional[Dict[str, Any]],
+    turns: Optional[List[Any]],
+    question: str,
+) -> str:
+    """Assemble the Q&A prompt from the new (AccountResearch + ConversationTurn) shape.
+
+    Pure: no DB, no HTTP. Caller is responsible for fetching the rows.
+    Truncates the blob's per-claim text if the assembled context overruns
+    the cap. The system stanza forbids fabrication and instructs the LLM
+    to say "I don't have that in the research" when the answer isn't
+    grounded in the blob or turns.
+    """
+    blob_section = _render_blob_section(research_blob)
+    turns_section = _render_turns_section(turns)
+
+    context = _assemble(
+        account_name or "(unknown account)",
+        blob_section,
+        # No separate contacts section in v2 — contacts live inside the
+        # blob's agent_8_contacts section already.
+        "",
+        turns_section,
+        question,
+    )
+
+    if len(context) <= _TOTAL_CONTEXT_CHAR_CAP:
+        return context
+
+    # Truncation strategy: drop the oldest conversation turns first,
+    # keep the last 10. Cheap and preserves the most recent context.
+    if turns and len(turns) > 10:
+        truncated_turns = list(turns)[-10:]
+        turns_section = _render_turns_section(truncated_turns)
+        context = _assemble(
+            account_name or "(unknown account)",
+            blob_section,
+            "",
+            turns_section,
+            question,
+        )
+
+    if len(context) <= _TOTAL_CONTEXT_CHAR_CAP:
+        return context
+
+    # Still over budget — clip the blob section itself. We never drop the
+    # system stanza or the current question.
+    overflow = len(context) - _TOTAL_CONTEXT_CHAR_CAP
+    if len(blob_section) > overflow + 200:
+        blob_section = blob_section[: -overflow - 200] + "\n[…research truncated to fit context window…]"
+    context = _assemble(
+        account_name or "(unknown account)",
+        blob_section,
+        "",
+        turns_section,
+        question,
+    )
     return context
 
 

@@ -405,13 +405,22 @@ def _v1_action_intent_disambig(ack, body, say, client):
 
 @app.action(re.compile(r"^intent_type_.+$"))
 def _v1_action_intent_type(ack, body, say, client):
-    """Persist intent + fire `run_account_research` (spec §5 Move 1)."""
+    """Persist intent + fire the 8-agent v1 research run (May 26 spec).
+
+    Phase 5 cutover: this handler now drives `run_v1_research_sync` —
+    the dispatcher → aggregator → renderer pipeline that writes to the
+    new `AccountResearch` table keyed on `thread_ts`. The legacy
+    `_v1_run_account_research` (single-shot Exa+OpenRouter +
+    `_v1_run_persona_research` two-stage flow) is no longer triggered
+    from production; it's only kept callable for legacy tests.
+    """
     ack()
     try:
         raw_value = body["actions"][0]["value"]
         session_id, intent_value = raw_value.split("::", 1)
         user_id = body["user"]["id"]
         thread_ts = body.get("message", {}).get("ts")
+        channel_id = body.get("channel", {}).get("id")
     except (KeyError, IndexError, ValueError, TypeError) as e:
         logger.warning("[intent_type] malformed payload: %s", type(e).__name__)
         return
@@ -449,45 +458,40 @@ def _v1_action_intent_type(ack, body, say, client):
         "disambiguation": normalized_for_runner.get("disambiguation"),
     })
 
-    # Reconstruct the in-memory ResearchSession. The dataclass is what
-    # `run_account_research` expects; it reads `session_id`, `rep_id`,
-    # `account_name`, and (now) `normalized_request`.
     sess = _v1_get_session(session_id)
     if sess is None:
         sess = _v1_create_session(rep_id=user_id, account_name=account_name or "")
-        # Force the session_id to match the DB row so any downstream
-        # caching keys are stable.
         sess.session_id = session_id
     sess.normalized_request = normalized_for_runner
+    # Contact-oriented intents tell agent 8 which personas to pull. For
+    # general_research we leave personas empty — agent 8 still attempts
+    # an Apollo pull but the title filter will be permissive.
+    if intent_value in _V1_CONTACT_INTENTS and not sess.personas:
+        sess.personas = list(_V1_DEFAULT_PERSONAS)
 
     def threaded_say(**kwargs):
         if thread_ts:
             kwargs.setdefault("thread_ts", thread_ts)
         return say(**kwargs)
 
-    try:
-        _v1_run_account_research(sess, threaded_say)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[intent_type] run_account_research failed: %s", type(e).__name__)
+    # Local import — runner_v1 pulls in asyncio + the 8 agent modules,
+    # which is heavy. Keep it lazy so unrelated handlers don't pay the
+    # import cost at module load.
+    from src.research.agents.runner_v1 import run_v1_research_sync
 
-    # Phase 17 — auto-trigger Stage 2 (HubSpot + Apollo contact pull)
-    # for contact-oriented intents. `general_research` skips this; the
-    # follow-up Q&A handler will lazy-fetch contacts on demand instead.
-    if intent_value in _V1_CONTACT_INTENTS:
-        if not sess.personas:
-            sess.personas = list(_V1_DEFAULT_PERSONAS)
-        try:
-            threaded_say(text="🔎 Pulling contacts from HubSpot + Apollo…")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "[intent_type] contact-status post failed: %s", type(e).__name__
-            )
-        try:
-            _v1_run_persona_research(sess, threaded_say)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "[intent_type] run_persona_research failed: %s", type(e).__name__
-            )
+    try:
+        run_v1_research_sync(
+            session=sess,
+            thread_ts=thread_ts or "",
+            channel_id=channel_id,
+            rep_id=user_id,
+            intent=intent_value,
+            post=threaded_say,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[intent_type] run_v1_research failed: %s", type(e).__name__
+        )
 
 
 @app.message()
