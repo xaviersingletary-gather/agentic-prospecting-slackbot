@@ -29,6 +29,7 @@ from src.research.account_research_store import (
     get_account_research_by_thread_ts,
     get_recent_turns,
 )
+from src.usage.v1_events import log_followup
 from src.db.models import (
     CompanyResearch,
     ContactResearch,
@@ -692,6 +693,16 @@ def handle_followup(
                 "answer_length": len(raw_answer or ""),
                 "latency_ms": elapsed_ms,
             },
+        )
+        # JSONL counterpart for /research-bot-stats. Question/answer text
+        # never persisted — lengths only.
+        log_followup(
+            thread_ts=thread_ts,
+            rep_id=user_id,
+            question_length=len(bare_question),
+            answer_length=len(raw_answer or ""),
+            latency_ms=elapsed_ms,
+            used_v2_path=bool(new_blob_row and new_blob_row.research_blob),
         )
     finally:
         db.close()

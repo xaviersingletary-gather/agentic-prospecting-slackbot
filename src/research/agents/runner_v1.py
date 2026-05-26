@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable, Optional
 
 from src.research.account_research_store import upsert_account_research
 from src.research.agents.aggregator import assemble_research_blob
+from src.research.agents.contract import SourceTag
 from src.research.agents.dispatcher import DispatcherInput, dispatch
 from src.research.agents.renderer import (
     chunk_blocks_for_slack,
@@ -40,6 +42,7 @@ from src.research.clients_factory import (
 )
 from src.research.sessions import ResearchSession
 from src.security.exception_logger import safe_log_exception
+from src.usage.v1_events import log_agent_failure, log_new_query
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +102,29 @@ async def run_v1_research(
         hubspot_portal_id=hubspot_portal_id,
     )
 
+    run_start = time.monotonic()
     try:
         agent_results = await dispatch(inp, timeout_sec=timeout_sec)
     except Exception as e:  # noqa: BLE001 — defense in depth
         safe_log_exception(logger, e, "[runner_v1] dispatch failed")
         agent_results = []
+    total_ms = int((time.monotonic() - run_start) * 1000)
+
+    # Per-agent failures → one JSONL row per failed agent so the admin
+    # log captures recovery decisions per-slot. ERROR is emitted by the
+    # dispatcher when an agent times out or raises.
+    for r in agent_results:
+        if any(c.source_tag is SourceTag.ERROR for c in r.claims):
+            error_text = next(
+                (c.text for c in r.claims if c.source_tag is SourceTag.ERROR),
+                "Unknown error",
+            )
+            log_agent_failure(
+                agent_name=r.agent_name,
+                account_name=session.account_name,
+                error_type=error_text[:120],
+                recovery="rendered section as ERROR; other agents continued",
+            )
 
     blob = assemble_research_blob(
         account_name=session.account_name,
@@ -134,6 +155,24 @@ async def run_v1_research(
                 break
     except Exception as e:  # noqa: BLE001 — render bug → swallow
         safe_log_exception(logger, e, "[runner_v1] render failed")
+
+    # One JSONL row per run, regardless of success/failure shape.
+    log_new_query(
+        account_name=session.account_name,
+        rep_id=rep_id or "",
+        intent=intent,
+        thread_ts=thread_ts,
+        total_ms=total_ms,
+        agent_durations_ms={
+            r.agent_name: r.duration_ms or 0 for r in agent_results
+        },
+        errored_agents=[
+            r.agent_name
+            for r in agent_results
+            if any(c.source_tag is SourceTag.ERROR for c in r.claims)
+        ],
+        total_claims=blob.get("stats", {}).get("total_claims", 0),
+    )
 
     return row_id
 

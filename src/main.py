@@ -385,12 +385,14 @@ def _v1_action_intent_disambig(ack, body, say, client):
         logger.warning("[intent_disambig] malformed payload: %s", type(e).__name__)
         return
 
+    account_name_for_log = None
     db = None
     try:
         db = SessionLocal()
         db_session = db.query(Session).filter(Session.id == session_id).first()
         if db_session is None:
             return
+        account_name_for_log = db_session.account_name
         normalized = dict(db_session.normalized_request or {})
         normalized["disambiguation"] = label
         db_session.normalized_request = normalized
@@ -401,6 +403,15 @@ def _v1_action_intent_disambig(ack, body, say, client):
     finally:
         if db is not None:
             db.close()
+
+    if account_name_for_log:
+        from src.usage.v1_events import log_disambig
+        log_disambig(
+            account_name=account_name_for_log,
+            rep_id=body.get("user", {}).get("id", ""),
+            candidates=[],  # original candidate list isn't in body payload
+            chosen=label,
+        )
 
 
 @app.action(re.compile(r"^intent_type_.+$"))
@@ -1611,6 +1622,24 @@ def handle_submit_clarification(ack, body, say, client):
 @app.action(re.compile(r"approve_persona_.*"))
 def handle_persona_checkbox(ack, body):
     ack()
+
+
+# ---------------------------------------------------------------------------
+# Admin slash commands
+# ---------------------------------------------------------------------------
+
+
+@app.command("/research-bot-stats")
+def _v1_command_stats(ack, command, respond):
+    """Admin-gated JSONL stats dump (May 26 V1 spec, Phase 6).
+
+    Reads the last ~100 usage events and posts a counts + averages
+    summary back to the caller (ephemeral). Non-admins get a polite
+    refusal that doesn't confirm the command exists.
+    """
+    from src.handlers.research_bot_stats import handle_stats_command
+
+    handle_stats_command(payload=command, ack=ack, respond=respond)
 
 
 if __name__ == "__main__":
