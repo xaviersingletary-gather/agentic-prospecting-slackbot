@@ -135,3 +135,36 @@ class WorkflowEvent(Base):
     rep_id = Column(String)
     payload = Column(JSON)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# V1 (May 26 spec) tables — thread-keyed research + conversation history.
+# These coexist with the legacy Session / CompanyResearch flow during the
+# transition; once the 8-agent dispatcher (Phase 4) is the only writer, the
+# legacy CompanyResearch table can be retired.
+# ---------------------------------------------------------------------------
+
+
+class AccountResearch(Base):
+    __tablename__ = "account_research"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    thread_ts = Column(String, nullable=False, unique=True, index=True)
+    channel_id = Column(String)
+    rep_id = Column(String)
+    account_name = Column(String, nullable=False)
+    intent = Column(String)                      # prospecting | meeting_prep | asset_building | general_research
+    research_blob = Column(JSON)                 # full 8-agent assembled output
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ConversationTurn(Base):
+    __tablename__ = "conversation_turns"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    thread_ts = Column(String, nullable=False, index=True)
+    role = Column(String, nullable=False)        # user | assistant
+    message = Column(Text, nullable=False)
+    rep_id = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)

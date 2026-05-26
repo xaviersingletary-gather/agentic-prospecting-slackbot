@@ -27,6 +27,11 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE personas ADD COLUMN IF NOT EXISTS deep_research_flagged BOOLEAN DEFAULT FALSE",
     "ALTER TABLE personas ADD COLUMN IF NOT EXISTS gong_hook TEXT",
     "ALTER TABLE sequences ADD COLUMN IF NOT EXISTS personalization_tier VARCHAR",
+    # V1 May 26 spec — AccountResearch + ConversationTurn indexes. Tables are
+    # created by Base.metadata.create_all; these statements are idempotent
+    # safeguards for rolling deploys where the table predates the constraint.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_account_research_thread_ts ON account_research (thread_ts)",
+    "CREATE INDEX IF NOT EXISTS ix_conversation_turns_thread_ts ON conversation_turns (thread_ts)",
 ]
 
 

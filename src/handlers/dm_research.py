@@ -25,6 +25,7 @@ from src.handlers.followup_qa import (
     is_bot_mentioned,
     log_forbidden_followup,
 )
+from src.research.account_research_store import has_research_for_thread
 from src.handlers.intent_capture import (
     intent_capture_card,
     is_account_ambiguous,
@@ -124,6 +125,16 @@ def handle_research_dm(
     # ------------------------------------------------------------------
     thread_ts = message.get("thread_ts")
     if thread_ts:
+        # V1 May 26 spec: thread_ts → AccountResearch row → follow-up route.
+        # When present we route to Q&A on any bot-mention, independent of
+        # the legacy Session lookup. The legacy lookup remains as a fallback
+        # until Phase 5 retires it.
+        if has_research_for_thread(thread_ts):
+            bot_user_id = get_bot_user_id(client) if client is not None else None
+            if bot_user_id and is_bot_mentioned(raw_text, bot_user_id):
+                handle_followup(message=message, say=say, client=client)
+            return
+
         session_row = get_session_by_thread_ts(thread_ts, user_id)
         if session_row is not None:
             bot_user_id = get_bot_user_id(client) if client is not None else None
