@@ -16,19 +16,20 @@ logger = logging.getLogger(__name__)
 # Intent-emphasis stanzas (V1 Daily-Use spec §5 Move 1). Prepended to the
 # plays prompt so the agent leans toward the rep's actual use case.
 _INTENT_EMPHASIS = {
-    "outbound": (
+    "prospecting": (
         "EMPHASIS: prioritize trigger events, automation vendor signals, "
         "and cold-open hooks suitable for a first-touch email."
     ),
-    "pre_call": (
+    "meeting_prep": (
         "EMPHASIS: prioritize the most recent news, executive moves, and "
         "discovery questions for an upcoming call."
     ),
-    "renewal": (
-        "EMPHASIS: prioritize expansion signals, risk indicators, and "
-        "existing-relationship strengthening cues."
+    "asset_building": (
+        "EMPHASIS: prioritize concrete operational metrics, named "
+        "automation deployments, financial framing, and quotable "
+        "executive statements suitable for ROI or cost-of-inaction docs."
     ),
-    "just_digging": "EMPHASIS: broad and balanced coverage.",
+    "general_research": "EMPHASIS: broad and balanced coverage.",
 }
 
 

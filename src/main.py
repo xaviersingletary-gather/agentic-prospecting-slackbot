@@ -365,7 +365,7 @@ def _v1_action_intent_type(ack, body, say, client):
         logger.warning("[intent_type] run_account_research failed: %s", type(e).__name__)
 
     # Phase 17 — auto-trigger Stage 2 (HubSpot + Apollo contact pull)
-    # for contact-oriented intents. `just_digging` skips this; the
+    # for contact-oriented intents. `general_research` skips this; the
     # follow-up Q&A handler will lazy-fetch contacts on demand instead.
     if intent_value in _V1_CONTACT_INTENTS:
         if not sess.personas:

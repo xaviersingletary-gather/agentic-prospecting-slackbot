@@ -178,11 +178,13 @@ def _parse_ambiguity_response(
 # ---------------------------------------------------------------------------
 
 # Fixed intent options — value suffix maps to the persisted `intent_type`.
+# Renamed for the May 26 V1 spec §3. Internal codes match the spec labels
+# verbatim (snake_case); user-facing labels use Title Case.
 _INTENT_OPTIONS = [
-    ("Outbound first-touch", "outbound"),
-    ("Pre-call prep", "pre_call"),
-    ("Renewal", "renewal"),
-    ("Just digging", "just_digging"),
+    ("Prospecting", "prospecting"),
+    ("Meeting Prep", "meeting_prep"),
+    ("Asset Building", "asset_building"),
+    ("General Research", "general_research"),
 ]
 
 

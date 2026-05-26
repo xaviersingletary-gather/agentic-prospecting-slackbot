@@ -239,7 +239,7 @@ def test_card_always_includes_four_intent_buttons():
     intent_buttons = _collect_intent_buttons(blocks)
     assert len(intent_buttons) == 4
     values = {b.get("value", "").split("::", 1)[-1] for b in intent_buttons}
-    assert values == {"outbound", "pre_call", "renewal", "just_digging"}
+    assert values == {"prospecting", "meeting_prep", "asset_building", "general_research"}
 
     # With disambig
     options = [{"label": "Volvo Group", "distinguisher": "Trucks"}]
@@ -303,7 +303,7 @@ def test_handle_research_dm_posts_intent_card_when_no_snapshot(mocker, patched_d
                 for el in b.get("elements", []):
                     if (el.get("action_id") or "").startswith("intent_type_"):
                         posted_action_ids.add(el.get("value", "").split("::", 1)[-1])
-    assert {"outbound", "pre_call", "renewal", "just_digging"} <= posted_action_ids
+    assert {"prospecting", "meeting_prep", "asset_building", "general_research"} <= posted_action_ids
 
 
 def test_handle_research_dm_does_not_run_research_until_intent_submitted(
@@ -373,7 +373,7 @@ def test_submit_intent_persists_to_normalized_request(mocker, patched_db):
     say = MagicMock()
     client = MagicMock()
     body = {
-        "actions": [{"value": "sess-i1::outbound"}],
+        "actions": [{"value": "sess-i1::prospecting"}],
         "user": {"id": "U1"},
         "message": {"ts": "1700002000.0001"},
         "channel": {"id": "D_CHAN_1"},
@@ -388,7 +388,7 @@ def test_submit_intent_persists_to_normalized_request(mocker, patched_db):
     finally:
         db.close()
     assert row is not None
-    assert (row.normalized_request or {}).get("intent_type") == "outbound"
+    assert (row.normalized_request or {}).get("intent_type") == "prospecting"
 
 
 def test_submit_intent_logs_event(mocker, patched_db):
@@ -413,7 +413,7 @@ def test_submit_intent_logs_event(mocker, patched_db):
     from src.main import _v1_action_intent_type
 
     body = {
-        "actions": [{"value": "sess-i2::pre_call"}],
+        "actions": [{"value": "sess-i2::meeting_prep"}],
         "user": {"id": "U1"},
         "message": {"ts": "1700002000.0001"},
         "channel": {"id": "D_CHAN_1"},
@@ -431,7 +431,7 @@ def test_submit_intent_logs_event(mocker, patched_db):
         db.close()
     assert len(evts) == 1
     payload = evts[0].payload or {}
-    assert payload.get("intent_type") == "pre_call"
+    assert payload.get("intent_type") == "meeting_prep"
 
 
 def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db):
@@ -443,7 +443,7 @@ def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db
     from src.main import _v1_action_intent_type
 
     body = {
-        "actions": [{"value": "sess-i3::renewal"}],
+        "actions": [{"value": "sess-i3::asset_building"}],
         "user": {"id": "U1"},
         "message": {"ts": "1700002000.0001"},
         "channel": {"id": "D_CHAN_1"},
@@ -456,7 +456,7 @@ def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db
     session = args[0] if args else kwargs.get("session")
     assert session is not None
     assert getattr(session, "account_name", "") == "Sysco"
-    assert (getattr(session, "normalized_request", None) or {}).get("intent_type") == "renewal"
+    assert (getattr(session, "normalized_request", None) or {}).get("intent_type") == "asset_building"
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ def test_submit_intent_fires_run_account_research_with_intent(mocker, patched_db
 
 
 def test_research_agent_prompt_includes_intent_emphasis(mocker, monkeypatch):
-    """`run_account_research` with `intent_type="outbound"` produces a
+    """`run_account_research` with `intent_type="prospecting"` produces a
     research-agent prompt that contains the outbound emphasis line.
 
     We patch the OpenAI client used inside `findings_builder` (the LLM
@@ -521,7 +521,7 @@ def test_research_agent_prompt_includes_intent_emphasis(mocker, monkeypatch):
         return_value=mock_openai_instance,
     )
 
-    # Build a ResearchSession with intent_type="outbound" and fire.
+    # Build a ResearchSession with intent_type="prospecting" and fire.
     from src.research.sessions import ResearchSession
     from src.research.runner import run_account_research
 
@@ -531,7 +531,7 @@ def test_research_agent_prompt_includes_intent_emphasis(mocker, monkeypatch):
         account_name="Sysco",
         personas=[],
     )
-    sess.normalized_request = {"intent_type": "outbound"}
+    sess.normalized_request = {"intent_type": "prospecting"}
 
     posts = []
     def _say(**kw):

@@ -26,6 +26,7 @@ from src.handlers.followup_qa import (
     log_forbidden_followup,
 )
 from src.research.account_research_store import has_research_for_thread
+from src.handlers.icp_gate import check_icp_fit, icp_override_card
 from src.handlers.intent_capture import (
     intent_capture_card,
     is_account_ambiguous,
@@ -54,6 +55,34 @@ _PREFIX_PATTERNS = [
     r"^\s*who\s+is(?:\s+|$)",
     r"^\s*what\s+(?:do\s+you\s+know\s+about|about)(?:\s+|$)",
 ]
+
+# Subset of `_PREFIX_PATTERNS` that ALWAYS imply "start a new research run".
+# Used inside a research thread to detect when the rep accidentally typed
+# `research X` instead of starting a fresh DM. The intent verbs here are
+# explicit ("research", "look up", "pull research") — pure conversation
+# ("what about their CFO?") doesn't trigger the nudge.
+_NEW_QUERY_INTENT_PATTERNS = [
+    r"^\s*(?:run\s+)?(?:a\s+)?research(?:\s+on)?(?:\s+|$)",
+    r"^\s*look\s+up(?:\s+|$)",
+    r"^\s*pull\s+(?:up\s+|some\s+)?(?:research\s+(?:on\s+)?)?",
+]
+
+
+def _looks_like_new_research_query(text: str) -> bool:
+    """True when the message has an explicit research-intent prefix.
+
+    The thread guard fires only on these — conversational replies are
+    routed to the existing Q&A path (when @-mentioned) or silently
+    ignored (when not). Strips a leading Slack `<@BOTID>` mention before
+    matching so `@bot research Acme` is still recognized.
+    """
+    if not text:
+        return False
+    stripped = re.sub(r"^\s*<@[^>]+>[\s,:]*", "", text, count=1)
+    for pat in _NEW_QUERY_INTENT_PATTERNS:
+        if re.search(pat, stripped, re.IGNORECASE):
+            return True
+    return False
 
 
 def _extract_account_name(text: str) -> str:
@@ -130,6 +159,23 @@ def handle_research_dm(
         # the legacy Session lookup. The legacy lookup remains as a fallback
         # until Phase 5 retires it.
         if has_research_for_thread(thread_ts):
+            # New-account-in-existing-thread guard (May 26 V1 spec §8).
+            # If the message has an explicit research-intent prefix
+            # ("research Acme", "look up Sysco"), nudge the rep to open a
+            # fresh thread. We check this BEFORE the bot-mention path so
+            # a stray "@bot research Acme" inside a Walmart thread doesn't
+            # bind a new account to the wrong research blob.
+            if _looks_like_new_research_query(raw_text):
+                say(
+                    text=(
+                        "Looks like you're starting a new account. "
+                        "Please send me a fresh DM — each research thread "
+                        "is pinned to a single account."
+                    ),
+                    thread_ts=thread_ts,
+                )
+                return
+
             bot_user_id = get_bot_user_id(client) if client is not None else None
             if bot_user_id and is_bot_mentioned(raw_text, bot_user_id):
                 handle_followup(message=message, say=say, client=client)
@@ -263,6 +309,25 @@ def handle_research_dm(
                 fresh_snapshot, account_name, session.session_id
             ),
             text=f"I have prior research on {account_name}.",
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # ICP sanity-check (May 26 V1 spec §7 step 2). If the account looks
+    # wildly out of Gather AI's ICP, surface an override card and stop.
+    # Rep clicks "Research anyway" → intent capture fires from the
+    # `icp_override_proceed` action handler. None / unsure → proceed
+    # straight to intent capture below.
+    # ------------------------------------------------------------------
+    icp_flag = check_icp_fit(account_name)
+    if icp_flag is not None:
+        threaded_say(
+            blocks=icp_override_card(
+                account_name=account_name,
+                reason=icp_flag["reason"],
+                session_id=session.session_id,
+            ),
+            text=f"{account_name} looks outside Gather AI's ICP.",
         )
         return
 

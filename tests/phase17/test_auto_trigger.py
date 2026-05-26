@@ -4,9 +4,9 @@ Covers:
 - `_persist_personas_from_tag_result` upserts Persona rows from a
   Stage 2 tag_result.contacts list, idempotent within a session.
 - Classification of `persona_type` (TDM/ODM/ExSp/IT) from title.
-- `CONTACT_INTENTS` set is exactly {outbound, pre_call, renewal}.
+- `CONTACT_INTENTS` set is exactly {prospecting, meeting_prep, asset_building}.
 - Stage 2 fires after Stage 1 for contact-oriented intents and does
-  not fire for `just_digging`.
+  not fire for `general_research`.
 
 DB is sqlite in-memory; external Slack / Apollo / HubSpot are mocked.
 """
@@ -60,8 +60,8 @@ def _make_research_session(personas=None) -> ResearchSession:
 
 
 def test_contact_intents_set_membership():
-    assert CONTACT_INTENTS == frozenset({"outbound", "pre_call", "renewal"})
-    assert "just_digging" not in CONTACT_INTENTS
+    assert CONTACT_INTENTS == frozenset({"prospecting", "meeting_prep", "asset_building"})
+    assert "general_research" not in CONTACT_INTENTS
 
 
 def test_default_personas_covers_four_roles():

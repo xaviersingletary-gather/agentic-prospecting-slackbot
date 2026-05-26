@@ -8,7 +8,7 @@ Seven canonical-flow tests trace spec §3:
   4. Suggested-question click equivalent to typed `@`-mention
   5. Unauthorized user is silent + logged
   6. Q&A path never touches Exa/Apollo/HubSpot
-  7. Captured intent ("renewal") reaches the agent prompt body
+  7. Captured intent ("asset_building") reaches the agent prompt body
 
 Hermetic: in-memory sqlite, mocked Slack client, mocked LLM. The
 SessionLocal patching matches earlier Phase 16 tests so the DB writes
@@ -372,7 +372,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
     _v1_action_intent_type(
         ack=MagicMock(),
         body={
-            "actions": [{"value": f"{session_id}::outbound"}],
+            "actions": [{"value": f"{session_id}::prospecting"}],
             "user": {"id": "U_REP_1"},
             "channel": {"id": "D_CHAN_1"},
             "message": {"ts": "1700010000.3000"},
@@ -393,7 +393,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
         if m.get("role") == "system"
     )
     assert "EMPHASIS" in sys_content
-    assert "cold-open" in sys_content.lower() or "outbound" in sys_content.lower()
+    assert "cold-open" in sys_content.lower() or "prospecting" in sys_content.lower()
 
     # And the disambiguation pinned to Volvo Group reached the prompt too.
     assert "Volvo Group" in sys_content
@@ -404,7 +404,7 @@ def test_e2e_first_time_account(mocker, monkeypatch, patched_db, tmp_path):
         row = db.query(DBSession).filter(DBSession.id == session_id).first()
     finally:
         db.close()
-    assert (row.normalized_request or {}).get("intent_type") == "outbound"
+    assert (row.normalized_request or {}).get("intent_type") == "prospecting"
     assert (row.normalized_request or {}).get("disambiguation") == "Volvo Group"
 
 
@@ -864,7 +864,7 @@ def test_e2e_no_fresh_retrieval_anywhere_in_qa_path(
 
 
 def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
-    """Fire `intent_type::renewal` → research runs → captured OpenAI
+    """Fire `intent_type::asset_building` → research runs → captured OpenAI
     prompt contains the literal renewal-emphasis stanza from
     `findings_builder._INTENT_EMPHASIS`.
     """
@@ -919,7 +919,7 @@ def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
     )
     mocker.patch("src.research.runner.is_fallback", return_value=False)
 
-    # Fire intent_type::renewal.
+    # Fire intent_type::asset_building.
     from src.main import _v1_action_intent_type
 
     say = MagicMock(return_value={"ts": "1700070000.2000"})
@@ -928,7 +928,7 @@ def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
     _v1_action_intent_type(
         ack=MagicMock(),
         body={
-            "actions": [{"value": "sess-intent-renewal::renewal"}],
+            "actions": [{"value": "sess-intent-renewal::asset_building"}],
             "user": {"id": "U_REP_6"},
             "channel": {"id": "D_CHAN_1"},
             "message": {"ts": "1700070000.1500"},
@@ -937,7 +937,7 @@ def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
         client=client,
     )
 
-    # The renewal emphasis stanza (literal from findings_builder).
+    # The asset_building emphasis stanza (literal from findings_builder).
     assert "kwargs" in captured, "OpenAI was never called from runner"
     messages = captured["kwargs"].get("messages") or []
     sys_content = "".join(
@@ -946,7 +946,7 @@ def test_e2e_research_passes_intent_to_agents(mocker, monkeypatch, patched_db):
         if m.get("role") == "system"
     )
 
-    # Direct sample from findings_builder._INTENT_EMPHASIS["renewal"].
-    assert "expansion signals" in sys_content
-    assert "risk indicators" in sys_content
-    assert "existing-relationship" in sys_content
+    # Direct sample from findings_builder._INTENT_EMPHASIS["asset_building"].
+    assert "concrete operational metrics" in sys_content
+    assert "named" in sys_content
+    assert "ROI" in sys_content or "cost-of-inaction" in sys_content

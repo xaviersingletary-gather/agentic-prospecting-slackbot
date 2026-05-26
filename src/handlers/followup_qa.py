@@ -99,7 +99,7 @@ def _lazy_fetch_contacts(
     """Fire the HubSpot + Apollo contact pipeline inline for `session_row`.
 
     Used when a follow-up question implies contact data but `Persona`
-    rows are empty for the session (e.g., rep picked `just_digging`
+    rows are empty for the session (e.g., rep picked `general_research`
     intent so Stage 2 never auto-ran). Edits the placeholder to a
     status line during the call. Persists Persona rows via
     `_persist_personas_from_tag_result`. Never raises.
@@ -544,7 +544,7 @@ def handle_followup(
             .all()
         )
 
-        # Phase 17 — lazy contact fetch. If the rep picked `just_digging`
+        # Phase 17 — lazy contact fetch. If the rep picked `general_research`
         # at intent capture, Stage 2 never auto-ran and `personas` is
         # empty. When the follow-up question implies contacts, fire the
         # HubSpot + Apollo pipeline inline, persist, and reload.

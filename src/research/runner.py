@@ -112,9 +112,9 @@ logger = logging.getLogger(__name__)
 
 # Phase 17 — intent-driven auto-trigger for Stage 2.
 # Intents in this set get HubSpot + Apollo contact discovery fired
-# automatically alongside Stage 1. `just_digging` is intentionally
+# automatically alongside Stage 1. `general_research` is intentionally
 # excluded — pure research mode, lazy-fetch on demand only.
-CONTACT_INTENTS = frozenset({"outbound", "pre_call", "renewal"})
+CONTACT_INTENTS = frozenset({"prospecting", "meeting_prep", "asset_building"})
 
 # Default persona set used when the rep hasn't selected personas
 # but the intent type implies contacts are needed.

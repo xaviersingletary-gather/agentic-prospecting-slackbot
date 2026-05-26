@@ -65,19 +65,20 @@ CITATION_RULE = (
 # capture card (spec §5 Move 1). Selected on the rep's intent click and
 # concatenated into the system prompt so the extractor leans appropriately.
 _INTENT_EMPHASIS = {
-    "outbound": (
+    "prospecting": (
         "EMPHASIS: prioritize trigger events, automation vendor signals, "
         "and cold-open hooks suitable for a first-touch email."
     ),
-    "pre_call": (
+    "meeting_prep": (
         "EMPHASIS: prioritize the most recent news, executive moves, and "
         "discovery questions for an upcoming call."
     ),
-    "renewal": (
-        "EMPHASIS: prioritize expansion signals, risk indicators, and "
-        "existing-relationship strengthening cues."
+    "asset_building": (
+        "EMPHASIS: prioritize concrete operational metrics, named "
+        "automation deployments, financial framing, and quotable "
+        "executive statements suitable for ROI or cost-of-inaction docs."
     ),
-    "just_digging": "EMPHASIS: broad and balanced coverage.",
+    "general_research": "EMPHASIS: broad and balanced coverage.",
 }
 
 
@@ -378,8 +379,8 @@ def _call_openrouter(
     )
 
     # Captured-intent emphasis is prepended to the system prompt so the
-    # extractor leans toward the rep's actual use case (outbound, pre-call,
-    # renewal, just digging). Spec §5 Move 1.
+    # extractor leans toward the rep's actual use case (prospecting,
+    # meeting prep, asset building, general research). Spec §5 Move 1.
     emphasis = _intent_emphasis(intent_type)
     system_content = SYSTEM_PROMPT
     if emphasis:
