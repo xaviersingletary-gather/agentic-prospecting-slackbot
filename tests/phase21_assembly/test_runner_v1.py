@@ -93,7 +93,7 @@ async def test_runner_v1_persists_blob_and_posts_to_slack(mocker, patched_db):
         assert row.intent == "prospecting"
         blob = row.research_blob
         assert blob and blob.get("schema_version") == 1
-        assert len(blob["agents"]) == 8
+        assert len(blob["agents"]) == 10
     finally:
         db.close()
 

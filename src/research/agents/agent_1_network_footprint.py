@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.agents.researcher import calculate_exception_tax
 from src.integrations.exa.client import ExaSearchClient
 from src.research.agents.contract import AgentResult, Claim, SourceTag
 from src.security.exception_logger import safe_log_exception
@@ -61,6 +62,68 @@ _DC_COUNT_RE = re.compile(
     r"warehouses?|facilities)",
     re.IGNORECASE,
 )
+
+# Pull a sqft integer back out of a previously emitted Claim.text. Sqft
+# claims this agent emits look like "~175,000,000 sq ft of warehouse
+# footprint disclosed." or "~120,000,000 sq ft estimated total footprint
+# (300 facilities × 400,000 sqft/DC 3pl benchmark)." — in both cases the
+# first comma-grouped integer in the text IS the total sqft figure.
+_SQFT_FROM_CLAIM_RE = re.compile(
+    r"~?\s*(?P<num>\d{1,3}(?:,\d{3})+|\d{4,})\s*(?:sq\s*ft|sqft|square\s*feet)",
+    re.IGNORECASE,
+)
+
+
+def _extract_sqft_from_claim_text(text: str) -> Optional[int]:
+    """Pull an integer sqft figure out of a Claim's `.text` field.
+
+    Used to bridge from the agent's own sqft claim into the Exception Tax
+    formula. Returns None if no plausible figure is parseable so the
+    caller can fall back to NOT_FOUND rather than feed garbage into the
+    deterministic math.
+    """
+    if not text:
+        return None
+    m = _SQFT_FROM_CLAIM_RE.search(text)
+    if not m:
+        return None
+    raw = m.group("num").replace(",", "")
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    if val < 10_000:  # too small to be a real warehouse footprint
+        return None
+    return val
+
+
+def _pick_sqft_claim_for_tax(
+    claims: List[Claim],
+) -> Optional[Tuple[Claim, int]]:
+    """Find the strongest sqft-bearing claim to feed the Exception Tax.
+
+    Preference order, per the worker spec:
+      1. The first PUBLIC sqft claim (hard sourced number).
+      2. Otherwise, the first INFERRED sqft claim (industry-benchmark math).
+
+    Returns `(claim, sqft_int)` or None if neither exists. We deliberately
+    skip NOT_FOUND and ERROR claims — the math is only meaningful when we
+    have some kind of sqft number to plug in.
+    """
+    sqft_claims = [
+        c for c in claims
+        if ("sq ft" in c.text.lower() or "sqft" in c.text.lower())
+        and c.source_tag in (SourceTag.PUBLIC, SourceTag.INFERRED)
+    ]
+    # Prefer PUBLIC over INFERRED.
+    for tag in (SourceTag.PUBLIC, SourceTag.INFERRED):
+        for c in sqft_claims:
+            if c.source_tag is not tag:
+                continue
+            sqft = _extract_sqft_from_claim_text(c.text)
+            if sqft:
+                return c, sqft
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +422,47 @@ async def run(ctx: AgentContext) -> AgentResult:
                     date=(top.get("published_date") or None) or None,
                 )
             )
+
+    # ---- Exception Tax (deterministic math; see src/agents/researcher.py)
+    # The AE morning brief expects shown math derived from the strongest
+    # sqft signal we already emitted. Whether sourced or inferred, the
+    # *savings* number is inferential — so the resulting claim is always
+    # INFERRED. When there's no sqft to plug in (SaaS / outside-ICP), we
+    # emit a NOT_FOUND so the section is never silently dropped.
+    sqft_pick_for_tax = _pick_sqft_claim_for_tax(claims)
+    if sqft_pick_for_tax is not None:
+        sqft_claim, total_sqft_for_tax = sqft_pick_for_tax
+        sqft_source = (
+            "public" if sqft_claim.source_tag is SourceTag.PUBLIC else "inferred"
+        )
+        tax = calculate_exception_tax(total_sqft_for_tax, sqft_source)
+        if sqft_claim.source_tag is SourceTag.PUBLIC:
+            inference_logic = tax["math_shown"]
+        else:
+            inference_logic = (
+                f"{tax['math_shown']}\n"
+                "Derived from sqft estimate × Gather exception-tax formula."
+            )
+        claims.append(
+            Claim(
+                text=(
+                    f"Exception Tax: ~${tax['annual_savings_mm']}M/year "
+                    "conservative annual savings"
+                ),
+                source_tag=SourceTag.INFERRED,
+                inference_logic=inference_logic,
+            )
+        )
+    else:
+        claims.append(
+            Claim(
+                text=(
+                    "Exception Tax not computed — no warehouse square "
+                    "footage available."
+                ),
+                source_tag=SourceTag.NOT_FOUND,
+            )
+        )
 
     duration_ms = int((time.monotonic() - started) * 1000)
     notes: Optional[str] = None

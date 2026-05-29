@@ -125,7 +125,9 @@ class AgentResult:
 # ---------------------------------------------------------------------------
 
 # Maps spec-stable agent_name → human section title. Order is preserved when
-# the aggregator renders sections; matches the spec §6 order.
+# the aggregator renders sections; matches the spec §6 order plus the two
+# May 29 additions from the SDR + AE skills audit (agent_9 = Industry & Pain;
+# agent_10 = Hook Candidates + Why Now).
 AGENT_SECTIONS: Dict[str, str] = {
     "agent_1_network_footprint": "Network Footprint",
     "agent_2_operating_baseline": "Operating Baseline",
@@ -133,6 +135,8 @@ AGENT_SECTIONS: Dict[str, str] = {
     "agent_4_customer_signals": "Customer-Facing Signals",
     "agent_5_shrink_compliance": "Shrink & Compliance",
     "agent_6_automation_stack": "Automation Stack",
+    "agent_9_industry_pain": "Industry & Pain",
     "agent_7_department_angles": "Department Angles / Personas",
     "agent_8_contacts": "Contacts",
+    "agent_10_hook_candidates": "Hooks & Why Now",
 }

@@ -279,6 +279,257 @@ async def test_error_path_exa_raises_returns_well_formed_result(caplog):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Market-position + named-competitors extensions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_walmart_market_position_number_one_with_competitors():
+    """Walmart-style: "largest US retailer" → PUBLIC #1 claim + competitors."""
+    edgar = _edgar_with(None)
+    exa = _exa_with(
+        {
+            "market share ranking": [
+                {
+                    "title": "Walmart remains the largest US retailer",
+                    "url": "https://www.retaildive.com/news/walmart-largest-2025",
+                    "snippet": (
+                        "Walmart is the largest US retailer by revenue, "
+                        "competitors include Amazon, Costco, and Target."
+                    ),
+                    "published_date": "2025-12-01",
+                }
+            ],
+            "top competitors": [
+                {
+                    "title": "Walmart rivals in retail",
+                    "url": "https://www.forbes.com/walmart-rivals",
+                    "snippet": (
+                        "Walmart competes with Amazon, Costco, Target, and Kroger "
+                        "in the US retail sector."
+                    ),
+                    "published_date": "2025-11-15",
+                }
+            ],
+        }
+    )
+
+    ctx = AgentContext(
+        account_name="Walmart",
+        edgar_client=edgar,
+        exa_client=exa,
+    )
+    result = await run(ctx)
+
+    public = _by_tag(result, SourceTag.PUBLIC)
+
+    # Market-position PUBLIC claim with #1 framing.
+    market_claims = [c for c in public if c.text.startswith("#1 in ")]
+    assert market_claims, (
+        f"Expected a #1 market-position PUBLIC claim; got "
+        f"{[c.to_dict() for c in result.claims]}"
+    )
+    assert market_claims[0].source_url
+    assert "retail" in market_claims[0].text.lower()
+
+    # Competitors PUBLIC claim — names appear.
+    competitor_claims = [
+        c for c in public if "Named competitors in sector" in c.text
+    ]
+    assert competitor_claims, "Expected a named-competitors PUBLIC claim"
+    text = competitor_claims[0].text
+    assert "Amazon" in text
+    # At least one of the other 3 names should make it through.
+    assert any(name in text for name in ("Costco", "Target", "Kroger"))
+
+
+@pytest.mark.asyncio
+async def test_geodis_market_position_top_3_framing():
+    """GEODIS-style: "top 3 global 3PL" → PUBLIC top-3 claim."""
+    edgar = _edgar_with(None)
+    exa = _exa_with(
+        {
+            "market share ranking": [
+                {
+                    "title": "GEODIS now top 3 global 3PL",
+                    "url": "https://www.geodis.com/press/top-3-3pl-2025",
+                    "snippet": (
+                        "GEODIS is a top 3 global 3PL by revenue. "
+                        "Competitors include DHL Supply Chain, Kuehne+Nagel, and DSV."
+                    ),
+                    "published_date": "2025-10-10",
+                }
+            ],
+            "top competitors": [
+                {
+                    "title": "Top 3PL providers",
+                    "url": "https://www.logisticsmgmt.com/top-3pl-2025",
+                    "snippet": (
+                        "GEODIS competes with DHL Supply Chain, Kuehne+Nagel, "
+                        "DSV, and CEVA Logistics in the global 3PL market."
+                    ),
+                    "published_date": "2025-09-20",
+                }
+            ],
+        }
+    )
+
+    ctx = AgentContext(
+        account_name="GEODIS",
+        edgar_client=edgar,
+        exa_client=exa,
+    )
+    result = await run(ctx)
+
+    public = _by_tag(result, SourceTag.PUBLIC)
+    top3_claims = [c for c in public if c.text.startswith("top 3 in ")]
+    assert top3_claims, (
+        f"Expected a top-3 market-position PUBLIC claim; got "
+        f"{[c.to_dict() for c in result.claims]}"
+    )
+    assert top3_claims[0].source_url
+    # Sector label captured.
+    assert "3pl" in top3_claims[0].text.lower() or "logistics" in top3_claims[0].text.lower()
+
+    competitor_claims = [
+        c for c in public if "Named competitors in sector" in c.text
+    ]
+    assert competitor_claims
+    assert "DHL" in competitor_claims[0].text or "Kuehne" in competitor_claims[0].text
+
+
+@pytest.mark.asyncio
+async def test_notion_outside_icp_market_position_not_found_or_inferred():
+    """Notion-style: no warehouse / sector signal → market position is
+    NOT_FOUND or INFERRED, never silently omitted."""
+    edgar = _edgar_with(None)
+    exa = _exa_with({})  # All queries return [].
+
+    ctx = AgentContext(
+        account_name="Notion",
+        edgar_client=edgar,
+        exa_client=exa,
+    )
+    result = await run(ctx)
+
+    # Either NOT_FOUND or INFERRED challenger framing — but never absent.
+    candidates = [
+        c
+        for c in result.claims
+        if (
+            "market-position" in (c.text or "").lower()
+            or "challenger" in (c.text or "").lower()
+            or "no named competitors" in (c.text or "").lower()
+            or "named competitors" in (c.text or "").lower()
+        )
+    ]
+    assert candidates, (
+        f"Expected at least one market-position / competitors claim; "
+        f"got {[c.to_dict() for c in result.claims]}"
+    )
+    # All such claims must be NOT_FOUND or INFERRED (no silent PUBLIC fabrication).
+    for c in candidates:
+        assert c.source_tag in {SourceTag.NOT_FOUND, SourceTag.INFERRED}, (
+            f"Unexpected source_tag for market-position claim: {c.to_dict()}"
+        )
+
+    # Specifically: at least one claim addresses each of {market position, competitors}.
+    joined = " ".join(c.text.lower() for c in candidates)
+    assert "market-position" in joined or "challenger" in joined
+    assert "competitor" in joined
+
+
+@pytest.mark.asyncio
+async def test_market_position_query_raises_but_other_claims_still_emit(caplog):
+    """Error path: one of the new Exa queries raises; existing
+    revenue/headcount claims still emit (partial result); failed query
+    contributes ERROR or NOT_FOUND."""
+    edgar = _edgar_with(None)
+    exa = MagicMock()
+
+    class _BoomOnRanking(RuntimeError):
+        pass
+
+    def _search(query: str, **kwargs):
+        q = query.lower()
+        if "market share ranking" in q or "top competitors" in q:
+            raise _BoomOnRanking("simulated outage on ranking query")
+        if "revenue" in q or "sales" in q:
+            return [
+                {
+                    "title": "Acme reports record revenue",
+                    "url": "https://acme.example.com/news/revenue",
+                    "snippet": "Acme reported revenue of $2.5 billion in 2025.",
+                    "published_date": "2026-01-10",
+                }
+            ]
+        if "employees" in q or "headcount" in q or "team of" in q:
+            return [
+                {
+                    "title": "Acme team",
+                    "url": "https://acme.example.com/about",
+                    "snippet": "Acme has 8,500 employees globally.",
+                    "published_date": "2026-01-12",
+                }
+            ]
+        return []
+
+    exa.search.side_effect = _search
+
+    ctx = AgentContext(
+        account_name="Acme Logistics",
+        edgar_client=edgar,
+        exa_client=exa,
+    )
+    with caplog.at_level("ERROR"):
+        result = await run(ctx)
+
+    # Result is well-formed; every claim round-trips.
+    [c.to_dict() for c in result.claims]
+
+    # Existing revenue PUBLIC claim still present.
+    public = _by_tag(result, SourceTag.PUBLIC)
+    assert any(
+        "$2.5" in (c.text or "") or "2.5 billion" in (c.text or "").lower()
+        for c in public
+    ), "Expected revenue PUBLIC claim to survive the ranking-query failure"
+    # Headcount PUBLIC claim still present.
+    assert any(
+        "8,500" in (c.text or "")
+        for c in public
+    ), "Expected headcount PUBLIC claim to survive the ranking-query failure"
+
+    # The failed ranking queries should leave behind either an ERROR slot
+    # or a NOT_FOUND slot for market-position / competitors.
+    market_slots = [
+        c
+        for c in result.claims
+        if (
+            "market-position" in (c.text or "").lower()
+            or "challenger" in (c.text or "").lower()
+            or "in " in (c.text or "")[:8].lower()  # "#1 in" / "top 3 in"
+        )
+        or c.source_tag is SourceTag.ERROR
+    ]
+    assert market_slots, "Expected a market-position slot (ERROR or NOT_FOUND)"
+    competitor_slots = [
+        c for c in result.claims if "competitor" in (c.text or "").lower()
+    ]
+    assert competitor_slots, "Expected a competitors slot (ERROR or NOT_FOUND)"
+
+    for c in market_slots + competitor_slots:
+        assert c.source_tag in {
+            SourceTag.ERROR,
+            SourceTag.NOT_FOUND,
+            SourceTag.INFERRED,
+        }
+
+    # Log hygiene — exception type name in logs, not the str(e) body.
+    assert "_BoomOnRanking" in caplog.text
+    assert "simulated outage on ranking query" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_every_claim_validates_and_round_trips():
     edgar = _edgar_with(None)

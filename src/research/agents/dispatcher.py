@@ -41,6 +41,8 @@ from src.research.agents import (
     agent_6_automation_stack as a6,
     agent_7_department_angles as a7,
     agent_8_contacts as a8,
+    agent_9_industry_pain as a9,
+    agent_10_hook_candidates as a10,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,15 +196,18 @@ async def dispatch(
     *,
     timeout_sec: float = DEFAULT_AGENT_TIMEOUT_SEC,
 ) -> List[AgentResult]:
-    """Run all 8 agents and return results in spec §6 order.
+    """Run all 10 agents and return results in AGENT_SECTIONS order.
 
-    Two waves:
+    Three waves:
       1. Agents 1-6 + 8 in parallel (no dependencies).
-      2. Agent 7 (department angles) — needs prior results to synthesize.
+      2. Agent 7 (Department Angles) and agent 9 (Industry & Pain) — both
+         synthesize from agents 1-6 in parallel.
+      3. Agent 10 (Hooks & Why Now) — needs agent 9's industry/pain output
+         in addition to the prior wave.
 
-    Returns a list of 8 AgentResults, one per agent slot, in the order
-    of `AGENT_SECTIONS`. Failed slots are filled with `AgentResult.error`
-    rather than dropped, so the Slack section header is always present.
+    Returns a list of AgentResults, one per slot, in `AGENT_SECTIONS`
+    order. Failed slots are filled with `AgentResult.error` so the Slack
+    section header always renders.
     """
     # First wave — all independent agents in parallel.
     first_wave_tasks = []
@@ -212,11 +217,11 @@ async def dispatch(
 
     first_results = await asyncio.gather(*first_wave_tasks)
 
-    # Index by agent_name for second-wave lookup + final ordering.
+    # Index by agent_name for downstream-wave lookup + final ordering.
     by_name: Dict[str, AgentResult] = {r.agent_name: r for r in first_results}
 
-    # Second wave — agent 7 needs the outputs of agents 1-6.
-    a7_priors = [
+    # Priors for second-wave synthesizers (agents 1-6).
+    six_priors = [
         by_name[name]
         for name in (
             "agent_1_network_footprint",
@@ -228,16 +233,40 @@ async def dispatch(
         )
         if name in by_name
     ]
+
+    # Second wave — agent 7 and agent 9 both synthesize from agents 1-6.
+    # They're independent of each other, so dispatch in parallel.
     a7_ctx = a7.AgentContext(
         account_name=inp.account_name,
-        prior_results=a7_priors,
+        prior_results=six_priors,
         intent=inp.intent,
     )
-    a7_result = await _run_one(
-        "agent_7_department_angles", a7, a7_ctx, timeout_sec
+    a9_ctx = a9.AgentContext(
+        account_name=inp.account_name,
+        prior_results=six_priors,
+        intent=inp.intent,
     )
-    by_name["agent_7_department_angles"] = a7_result
+    second_wave_tasks = [
+        _run_one("agent_7_department_angles", a7, a7_ctx, timeout_sec),
+        _run_one("agent_9_industry_pain", a9, a9_ctx, timeout_sec),
+    ]
+    second_results = await asyncio.gather(*second_wave_tasks)
+    for r in second_results:
+        by_name[r.agent_name] = r
 
-    # Final ordering — spec §6.
+    # Third wave — agent 10 needs agent 9's output for vocabulary hints
+    # plus the agents 1-6 priors for the dated trigger lookup.
+    a10_ctx = a10.AgentContext(
+        account_name=inp.account_name,
+        prior_results=six_priors,
+        industry_pain_result=by_name.get("agent_9_industry_pain"),
+        intent=inp.intent,
+    )
+    a10_result = await _run_one(
+        "agent_10_hook_candidates", a10, a10_ctx, timeout_sec
+    )
+    by_name[a10_result.agent_name] = a10_result
+
+    # Final ordering — AGENT_SECTIONS.
     ordered = [by_name[name] for name in _AGENT_ORDER if name in by_name]
     return ordered

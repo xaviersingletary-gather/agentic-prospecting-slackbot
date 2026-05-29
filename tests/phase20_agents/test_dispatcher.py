@@ -102,7 +102,7 @@ async def test_dispatcher_isolates_a_raising_agent():
             p.stop()
 
     by_name = {r.agent_name: r for r in results}
-    assert len(results) == 8
+    assert len(results) == 10
     a4 = by_name["agent_4_customer_signals"]
     assert a4.claims[0].source_tag is SourceTag.ERROR
     other_tags = [

@@ -107,7 +107,7 @@ def test_agent_result_error_helper_builds_single_error_claim():
 # ---------------------------------------------------------------------------
 
 
-def test_agent_sections_has_all_eight_in_spec_order():
+def test_agent_sections_has_all_ten_in_spec_order():
     keys = list(AGENT_SECTIONS.keys())
     assert keys == [
         "agent_1_network_footprint",
@@ -116,6 +116,8 @@ def test_agent_sections_has_all_eight_in_spec_order():
         "agent_4_customer_signals",
         "agent_5_shrink_compliance",
         "agent_6_automation_stack",
+        "agent_9_industry_pain",
         "agent_7_department_angles",
         "agent_8_contacts",
+        "agent_10_hook_candidates",
     ]

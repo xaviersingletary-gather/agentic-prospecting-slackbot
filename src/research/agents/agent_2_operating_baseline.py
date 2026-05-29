@@ -103,6 +103,81 @@ _GROWTH_KEYWORDS = (
     "series ",
 )
 
+# Market-position phrasing buckets. Lower-cased substring match.
+_TOP_1_PHRASES = (
+    "#1",
+    "no. 1",
+    "no.1",
+    "number one",
+    "number-one",
+    "largest",
+    "leading",
+    "market leader",
+    "industry leader",
+    "dominant",
+)
+_TOP_3_PHRASES = (
+    "top 3",
+    "top three",
+    "top-3",
+    "top 5",
+    "top five",
+    "top-5",
+    "second-largest",
+    "second largest",
+    "third-largest",
+    "third largest",
+    "one of the largest",
+    "among the largest",
+    "one of the biggest",
+    "among the biggest",
+)
+
+# Sector vocabulary — used to extract a short sector label from a snippet.
+# Order matters: more specific phrases first.
+_SECTOR_PHRASES = (
+    "us retailer",
+    "u.s. retailer",
+    "global retailer",
+    "global 3pl",
+    "global third-party logistics",
+    "third-party logistics",
+    "3pl",
+    "contract logistics",
+    "supply chain",
+    "logistics",
+    "ecommerce",
+    "e-commerce",
+    "grocery",
+    "pharmacy",
+    "pharma",
+    "healthcare",
+    "consumer goods",
+    "cpg",
+    "apparel",
+    "automotive",
+    "food and beverage",
+    "food & beverage",
+    "manufacturer",
+    "manufacturing",
+    "retailer",
+    "retail",
+    "industry",
+    "sector",
+)
+
+# Pull a competitor list. Matches "competitors include X, Y, and Z" /
+# "rivals X and Y" / "competes with X, Y" etc.
+_COMPETITOR_LIST_RE = re.compile(
+    r"(?:competitors?\s+(?:include|are|such\s+as)"
+    r"|rivals?\s+(?:include|are|such\s+as)?"
+    r"|competes?\s+(?:with|against)"
+    r"|key\s+(?:competitors?|rivals?)\s+(?:include|are|such\s+as)?)"
+    r"\s*[:\-]?\s*"
+    r"([A-Z][A-Za-z0-9&+\.\-'\s]+(?:,\s*(?:and\s+)?[A-Z][A-Za-z0-9&+\.\-'\s]+){0,6})",
+    re.IGNORECASE,
+)
+
 
 def _safe_assert(url: str) -> bool:
     """Return True if URL passes SSRF guard, False otherwise. Never raises."""
@@ -137,6 +212,69 @@ def _has_growth_signal(text: str) -> bool:
         return False
     low = text.lower()
     return any(k in low for k in _GROWTH_KEYWORDS)
+
+
+def _extract_sector(text: str) -> Optional[str]:
+    """Pick a short sector label from a snippet. Returns None if nothing
+    matches. Kept conservative — we want "global 3PL" / "US retailer" not
+    a sentence fragment."""
+    if not text:
+        return None
+    low = text.lower()
+    for phrase in _SECTOR_PHRASES:
+        if phrase in low:
+            return phrase
+    return None
+
+
+def _classify_market_position(text: str) -> Optional[str]:
+    """Return one of {"#1", "top 3"} if the snippet supports it, else None.
+
+    Order matters: a snippet containing both "top 3" and "leading" should
+    still classify as #1 only when "#1" / "largest" / "market leader"
+    appears unambiguously. We bias to top-3 when "one of the largest"
+    type phrasing shows up to avoid over-claiming.
+    """
+    if not text:
+        return None
+    low = text.lower()
+    # Top-3 framing takes precedence when softening phrases appear, so
+    # check it first.
+    if any(p in low for p in _TOP_3_PHRASES):
+        return "top 3"
+    if any(p in low for p in _TOP_1_PHRASES):
+        return "#1"
+    return None
+
+
+def _extract_named_competitors(text: str) -> List[str]:
+    """Return a list of named competitors mentioned in `text`. Empty list
+    if nothing parsable. Names are de-duplicated and stripped."""
+    if not text:
+        return []
+    m = _COMPETITOR_LIST_RE.search(text)
+    if not m:
+        return []
+    raw = m.group(1)
+    # Split on commas and " and ".
+    parts: List[str] = []
+    for chunk in re.split(r",|\s+and\s+", raw):
+        name = chunk.strip(" .;:-")
+        # Drop trailing words like "are major players" that the greedy
+        # match might pull in. We accept up to ~4 tokens per name.
+        if not name:
+            continue
+        tokens = name.split()
+        if len(tokens) > 4:
+            name = " ".join(tokens[:4])
+        # Filter out obvious non-name fragments.
+        if name.lower() in {"and", "or", "the"}:
+            continue
+        if name not in parts:
+            parts.append(name)
+        if len(parts) >= 5:
+            break
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +386,108 @@ def _growth_claims_from_exa(
         if len(out) >= 3:
             break
     return out
+
+
+def _market_position_from_exa(
+    exa: ExaSearchClient, account_name: str
+) -> Dict[str, Any]:
+    """Search Exa for market-share / ranking signals.
+
+    Returns a dict with keys:
+      - claim:  the market-position Claim to emit (PUBLIC / INFERRED / NOT_FOUND)
+      - competitors_claim:  the competitor Claim to emit (PUBLIC if a list
+        surfaced in the same snippet; otherwise None — the caller decides
+        whether to fall back to INFERRED based on its own search).
+      - errored: True if the underlying client raised before completing.
+    """
+    query = (
+        f"{account_name} market share ranking position competitors 2024 2025"
+    )
+    try:
+        results = exa.search(query, num_results=5) or []
+    except Exception as e:
+        safe_log_exception(
+            logger, e, "[agent_2] Exa market-position lookup failed"
+        )
+        return {"claim": None, "competitors_claim": None, "errored": True}
+
+    for r in results:
+        snippet = r.get("snippet") or ""
+        title = r.get("title") or ""
+        combined = f"{title}. {snippet}".strip(". ")
+        url = (r.get("url") or "").strip()
+        if not url or not _safe_assert(url):
+            continue
+        position = _classify_market_position(combined)
+        sector = _extract_sector(combined)
+        if position is None or sector is None:
+            continue
+        text = f"{position} in {sector}"
+        market_claim = Claim(
+            text=text,
+            source_tag=SourceTag.PUBLIC,
+            source_url=url,
+            date=r.get("published_date") or None,
+        )
+        # See if competitor names sit in the same snippet.
+        names = _extract_named_competitors(combined)
+        competitors_claim: Optional[Claim] = None
+        if names:
+            competitors_claim = Claim(
+                text=f"Named competitors in sector: {', '.join(names)}",
+                source_tag=SourceTag.PUBLIC,
+                source_url=url,
+                date=r.get("published_date") or None,
+            )
+        return {
+            "claim": market_claim,
+            "competitors_claim": competitors_claim,
+            "errored": False,
+        }
+
+    return {"claim": None, "competitors_claim": None, "errored": False}
+
+
+def _competitors_from_exa(
+    exa: ExaSearchClient, account_name: str
+) -> Dict[str, Any]:
+    """Second dedicated query for named competitors.
+
+    Used either when the market-position query didn't surface a list, or
+    to enrich the market-position claim. Returns dict shaped like
+    `_market_position_from_exa` but only populates `competitors_claim`.
+    """
+    query = (
+        f"{account_name} top competitors industry rivals leaders sector"
+    )
+    try:
+        results = exa.search(query, num_results=5) or []
+    except Exception as e:
+        safe_log_exception(
+            logger, e, "[agent_2] Exa competitors lookup failed"
+        )
+        return {"competitors_claim": None, "errored": True}
+
+    for r in results:
+        snippet = r.get("snippet") or ""
+        title = r.get("title") or ""
+        combined = f"{title}. {snippet}".strip(". ")
+        url = (r.get("url") or "").strip()
+        if not url or not _safe_assert(url):
+            continue
+        names = _extract_named_competitors(combined)
+        if not names:
+            continue
+        return {
+            "competitors_claim": Claim(
+                text=f"Named competitors in sector: {', '.join(names)}",
+                source_tag=SourceTag.PUBLIC,
+                source_url=url,
+                date=r.get("published_date") or None,
+            ),
+            "errored": False,
+        }
+    return {"competitors_claim": None, "errored": False}
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +608,94 @@ async def run(ctx: AgentContext) -> AgentResult:
                 text=(
                     f"No recent expansion / contraction / funding signals "
                     f"found for {account}."
+                ),
+                source_tag=SourceTag.NOT_FOUND,
+            )
+        )
+
+    # --- Market position + named competitors ---
+    # Two dedicated Exa queries. Per-fetcher try/except already inside
+    # each helper, so we never leak an exception here.
+    market_position_result = _market_position_from_exa(exa, account)
+    competitors_result = _competitors_from_exa(exa, account)
+
+    market_claim: Optional[Claim] = market_position_result.get("claim")
+    competitors_claim: Optional[Claim] = (
+        market_position_result.get("competitors_claim")
+        or competitors_result.get("competitors_claim")
+    )
+    market_errored = bool(market_position_result.get("errored"))
+    competitors_errored = bool(competitors_result.get("errored"))
+
+    # Market position claim emission.
+    if market_claim is not None:
+        claims.append(market_claim)
+    elif market_errored and competitors_errored:
+        # Both upstream calls failed — surface an ERROR slot so the
+        # section isn't silently missing.
+        claims.append(
+            Claim(
+                text=(
+                    "Market-position lookup failed "
+                    "(external search error)."
+                ),
+                source_tag=SourceTag.ERROR,
+            )
+        )
+    else:
+        # Try to infer sector from any PUBLIC growth/headcount/revenue
+        # snippet we already captured. If we can identify a sector,
+        # default to challenger framing; otherwise NOT_FOUND.
+        inferred_sector: Optional[str] = None
+        for existing in claims:
+            if existing.source_tag is SourceTag.PUBLIC:
+                inferred_sector = _extract_sector(existing.text or "")
+                if inferred_sector:
+                    break
+        if inferred_sector:
+            claims.append(
+                Claim(
+                    text=(
+                        f"Challenger position in {inferred_sector} "
+                        f"(no top-3 signal sourced)"
+                    ),
+                    source_tag=SourceTag.INFERRED,
+                    inference_logic=(
+                        "No public top-N ranking surfaced; "
+                        "defaulting to challenger framing."
+                    ),
+                )
+            )
+        else:
+            claims.append(
+                Claim(
+                    text=(
+                        f"No public market-position signal found for "
+                        f"{account} (sector not identified)."
+                    ),
+                    source_tag=SourceTag.NOT_FOUND,
+                )
+            )
+
+    # Competitors claim emission.
+    if competitors_claim is not None:
+        claims.append(competitors_claim)
+    elif competitors_errored and market_errored:
+        claims.append(
+            Claim(
+                text=(
+                    "Named-competitors lookup failed "
+                    "(external search error)."
+                ),
+                source_tag=SourceTag.ERROR,
+            )
+        )
+    else:
+        claims.append(
+            Claim(
+                text=(
+                    f"No named competitors surfaced for {account} "
+                    "(no industry-research article sourced)."
                 ),
                 source_tag=SourceTag.NOT_FOUND,
             )
