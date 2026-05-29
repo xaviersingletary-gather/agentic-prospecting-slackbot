@@ -56,6 +56,53 @@ def test_renderer_emits_timestamp_header_and_eight_section_headers():
         assert title in text_blob
 
 
+def test_renderer_formats_iso_date_and_flattens_multiline_basis():
+    """Regression: a PUBLIC claim with an Exa ISO timestamp and an INFERRED
+    claim with a multi-line `inference_logic` must each render on a single
+    clean line — no `.000Z` noise, no newline-broken italics."""
+    blob = assemble_research_blob(
+        account_name="Acme",
+        intent=None,
+        agent_results=[
+            _result(
+                "agent_1_network_footprint",
+                Claim(
+                    text="~375,000 sq ft disclosed.",
+                    source_tag=SourceTag.PUBLIC,
+                    source_url="https://acme.example/10k",
+                    date="2021-04-14T00:00:00.000Z",
+                ),
+                Claim(
+                    text="Exception Tax: ~$0.2M/year.",
+                    source_tag=SourceTag.INFERRED,
+                    inference_logic=(
+                        "Est. sq ft: ~375,000\n"
+                        "Pallet positions: 375,000 × 0.60 × 4 / 36 = ~25,000\n"
+                        "Annual savings: ~$200,000 (~$0.2M/yr)"
+                    ),
+                ),
+            ),
+        ],
+    )
+    blocks = render_research_blocks(blob)
+    text = "\n".join(
+        b.get("text", {}).get("text", "")
+        for b in blocks
+        if isinstance(b.get("text"), dict)
+    )
+
+    # Date is humanized, raw ISO noise gone.
+    assert "Apr 2021" in text
+    assert ".000Z" not in text
+    assert "2021-04-14T" not in text
+
+    # The basis renders as one line: the line carrying "Exception Tax"
+    # contains the whole basis (no mid-basis newline).
+    basis_line = next(ln for ln in text.splitlines() if "Exception Tax" in ln)
+    assert "Pallet positions" in basis_line
+    assert "Annual savings" in basis_line
+
+
 def test_renderer_includes_source_tag_chips_inline():
     blob = assemble_research_blob(
         account_name="X",

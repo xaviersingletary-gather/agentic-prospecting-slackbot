@@ -205,6 +205,31 @@ def _render_claim_line(claim: Dict[str, Any]) -> str:
     return f"• [{tag_label}] {text}{suffix}"
 
 
+def _humanize_date(date: str) -> str:
+    """Turn an Exa-style ISO-8601 timestamp into a compact `Mon YYYY` label.
+
+    Exa returns `published_date` as a full ISO string (e.g.
+    `2021-04-14T00:00:00.000Z`). Rendered raw it leaks `.000Z` noise into
+    the Slack output. We parse it to `Apr 2021`; anything we can't parse
+    falls back to the original string so non-ISO dates still render.
+    """
+    raw = date.strip()
+    if not raw:
+        return raw
+    # Normalise a trailing `Z` to an offset Python's parser accepts, and
+    # drop fractional seconds the stdlib parser is picky about.
+    candidate = raw.replace("Z", "+00:00")
+    for parse in (
+        lambda s: datetime.fromisoformat(s),
+        lambda s: datetime.strptime(s[:10], "%Y-%m-%d"),
+    ):
+        try:
+            return parse(candidate).strftime("%b %Y")
+        except (ValueError, TypeError):
+            continue
+    return raw
+
+
 def _humanize_intent(intent: str) -> str:
     return {
         "prospecting": "Prospecting",

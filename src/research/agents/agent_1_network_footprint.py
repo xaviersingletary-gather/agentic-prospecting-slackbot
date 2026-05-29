@@ -240,6 +240,30 @@ def _pick_sqft_result(
     return best
 
 
+def _clean_snippet(snippet: str) -> str:
+    """Flatten a raw Exa page snippet into a single clean sentence fragment.
+
+    Exa snippets are scraped page text and routinely contain markdown
+    headings (`##`, `###`), `[...]` truncation markers, list bullets, and
+    embedded newlines. Dumped verbatim into a Slack mrkdwn bullet these
+    render as literal `##` noise across multiple broken lines. We strip the
+    markup, drop the truncation markers, and collapse whitespace so the
+    claim is a single readable line. Returns "" when nothing useful is
+    left, so the caller can skip the breadcrumb entirely.
+    """
+    if not snippet:
+        return ""
+    text = snippet.replace("[...]", " ")
+    # Drop markdown heading / list / emphasis markers wherever they appear.
+    text = re.sub(r"[#*_`>]+", " ", text)
+    # Collapse all runs of whitespace (including newlines) to single spaces.
+    text = " ".join(text.split())
+    # If what remains is too short to be a real signal, treat as empty.
+    if len(text) < 15:
+        return ""
+    return text
+
+
 def _normalize_industry(industry: Optional[str]) -> Optional[str]:
     if not industry:
         return None
@@ -390,9 +414,7 @@ async def run(ctx: AgentContext) -> AgentResult:
                 source_tag=SourceTag.INFERRED,
                 inference_logic=(
                     f"positions = sqft × 0.60 × 4 / 36 = "
-                    f"{total_sqft:,} × 0.0667 ≈ {positions:,}. "
-                    "Formula from src/agents/researcher.py:"
-                    "calculate_exception_tax."
+                    f"{total_sqft:,} × 0.0667 ≈ {positions:,}"
                 ),
             )
         )
@@ -410,12 +432,12 @@ async def run(ctx: AgentContext) -> AgentResult:
     # ---- Location breadcrumbs (best-effort; one PUBLIC claim if found)
     if loc_results:
         top = loc_results[0]
-        if top.get("snippet"):
+        cleaned = _clean_snippet(top.get("snippet") or "")
+        if cleaned:
             claims.append(
                 Claim(
                     text=(
-                        f"Recent facility/location signal: "
-                        f"{top['snippet'][:200].strip()}"
+                        f"Recent facility/location signal: {cleaned[:200].strip()}"
                     ),
                     source_tag=SourceTag.PUBLIC,
                     source_url=top["url"],
