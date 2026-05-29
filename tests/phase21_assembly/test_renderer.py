@@ -12,6 +12,7 @@ from src.research.agents.contract import (
 )
 from src.research.agents.renderer import (
     _MAX_CHARS_PER_MESSAGE,
+    _MAX_CHARS_PER_SECTION_BLOCK,
     chunk_blocks_for_slack,
     render_research_blocks,
 )
@@ -196,6 +197,63 @@ def test_chunk_splits_on_section_boundary_when_oversize():
 
 def test_chunk_never_returns_empty_list():
     assert chunk_blocks_for_slack([]) == [[]]
+
+
+def test_no_section_block_exceeds_slack_per_block_limit():
+    """Slack rejects any section block whose `text.text` field exceeds
+    3000 chars with `invalid_blocks`. Reproduces the May 29 Kraft Heinz
+    production failure: an agent emits enough long claims that one
+    section's joined body went over the limit.
+    """
+    # Build claims whose joined body would be ~5x the per-block cap.
+    long_text = "x" * 600
+    big_claim = Claim(
+        text=long_text,
+        source_tag=SourceTag.INFERRED,
+        inference_logic=long_text,
+    )
+    blob = assemble_research_blob(
+        account_name="Kraft Heinz",
+        intent="prospecting",
+        agent_results=[
+            _result(
+                "agent_9_industry_pain",
+                big_claim, big_claim, big_claim, big_claim, big_claim,
+            )
+        ],
+    )
+    blocks = render_research_blocks(blob)
+    for b in blocks:
+        if isinstance(b.get("text"), dict):
+            text = b["text"].get("text", "")
+            assert len(text) <= 3000, (
+                f"section block exceeded Slack's 3000-char cap: {len(text)}"
+            )
+
+
+def test_oversized_single_line_is_hard_truncated():
+    """A single claim whose rendered line alone exceeds the per-block cap
+    must be truncated inline with a marker — not silently dropped."""
+    monster = "y" * (_MAX_CHARS_PER_SECTION_BLOCK + 500)
+    blob = assemble_research_blob(
+        account_name="X",
+        intent=None,
+        agent_results=[
+            _result(
+                "agent_9_industry_pain",
+                Claim(text=monster, source_tag=SourceTag.NOT_FOUND),
+            )
+        ],
+    )
+    blocks = render_research_blocks(blob)
+    text_bits = [
+        b["text"]["text"] for b in blocks if isinstance(b.get("text"), dict)
+    ]
+    body = "\n".join(text_bits)
+    assert "truncated" in body
+    for b in blocks:
+        if isinstance(b.get("text"), dict):
+            assert len(b["text"]["text"]) <= 3000
 
 
 def test_chunk_per_chunk_size_under_limit():

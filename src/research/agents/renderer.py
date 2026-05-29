@@ -20,6 +20,7 @@ Slack output safety:
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List
 
 from src.research.agents.aggregator import format_timestamp_for_slack
@@ -31,6 +32,12 @@ from src.security.safe_mrkdwn import safe_mrkdwn
 # message cap so reps see content fast, marked with continuation.
 _MAX_CHARS_PER_MESSAGE = 2800
 _MAX_CLAIMS_PER_SECTION = 8
+
+# Per-block hard cap. Slack rejects sections whose `text.text` field
+# exceeds 3000 chars with `invalid_blocks`. We pack content into multiple
+# section blocks per section when needed; 2700 leaves headroom for any
+# trailing markers we append.
+_MAX_CHARS_PER_SECTION_BLOCK = 2700
 
 _TAG_LABELS = {
     "public": ":globe_with_meridians: public",
@@ -125,13 +132,47 @@ def _render_section(agent_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"finding(s) elided; ask in-thread for more._"
         )
 
-    blocks.append(
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(lines)},
-        }
-    )
+    # Pack lines into one or more section blocks, each capped at
+    # _MAX_CHARS_PER_SECTION_BLOCK. Slack rejects any single section
+    # whose text exceeds 3000 chars (`invalid_blocks`). When a single
+    # line is itself oversized, hard-truncate it inline.
+    for body in _pack_lines_into_section_bodies(lines):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": body},
+            }
+        )
     return blocks
+
+
+def _pack_lines_into_section_bodies(lines: List[str]) -> List[str]:
+    """Group rendered claim lines into section bodies under the per-block cap.
+
+    Each body is at most `_MAX_CHARS_PER_SECTION_BLOCK` chars including
+    the inter-line newlines. A single line longer than the cap is
+    truncated to `cap - 24` chars with a "…(truncated)" marker so it
+    still passes Slack's validator.
+    """
+    cap = _MAX_CHARS_PER_SECTION_BLOCK
+    bodies: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for line in lines:
+        # Hard-truncate any single line that exceeds the per-block cap.
+        if len(line) > cap:
+            line = line[: cap - 24] + "… _(truncated)_"
+        line_len = len(line) + (1 if current else 0)  # +1 for newline
+        if current and current_len + line_len > cap:
+            bodies.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        bodies.append("\n".join(current))
+    return bodies or [""]
 
 
 def _render_claim_line(claim: Dict[str, Any]) -> str:
@@ -150,10 +191,15 @@ def _render_claim_line(claim: Dict[str, Any]) -> str:
         suffix_bits.append(f"_({safe_mrkdwn(src)})_")
     date = claim.get("date")
     if date:
-        suffix_bits.append(f"_{safe_mrkdwn(str(date))}_")
+        suffix_bits.append(f"_{safe_mrkdwn(_humanize_date(str(date)))}_")
     inference = claim.get("inference_logic")
     if inference:
-        suffix_bits.append(f"_basis: {safe_mrkdwn(inference)}_")
+        # Collapse newlines / runs of whitespace into a single line: Slack
+        # mrkdwn italics (`_..._`) cannot span newlines, so a multi-line
+        # basis (e.g. the Exception Tax `math_shown`) would otherwise leak
+        # stray underscores and break the styling mid-block.
+        flat = " ".join(str(inference).split())
+        suffix_bits.append(f"_basis: {safe_mrkdwn(flat)}_")
 
     suffix = " — " + " ".join(suffix_bits) if suffix_bits else ""
     return f"• [{tag_label}] {text}{suffix}"
