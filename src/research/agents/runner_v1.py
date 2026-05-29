@@ -143,7 +143,8 @@ async def run_v1_research(
 
     try:
         blocks = render_research_blocks(blob)
-        for chunk in chunk_blocks_for_slack(blocks):
+        chunks = chunk_blocks_for_slack(blocks)
+        for chunk_idx, chunk in enumerate(chunks):
             try:
                 post(
                     blocks=chunk,
@@ -151,6 +152,50 @@ async def run_v1_research(
                 )
             except Exception as e:  # noqa: BLE001
                 safe_log_exception(logger, e, "[runner_v1] Slack post failed")
+                # Surface the SlackApiError's response error code AND the
+                # chunk shape so we can tell whether it was invalid_blocks,
+                # too_long, or something else. Token-safe: response.error is
+                # a short Slack-defined string, never user content.
+                slack_error_code = None
+                response_meta = None
+                try:
+                    resp = getattr(e, "response", None)
+                    if resp is not None:
+                        # SlackApiError.response can be dict-like or
+                        # SlackResponse with .get().
+                        slack_error_code = (
+                            resp.get("error") if hasattr(resp, "get") else None
+                        )
+                        response_meta = (
+                            resp.get("response_metadata")
+                            if hasattr(resp, "get")
+                            else None
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "[runner_v1] Slack post chunk %d/%d failed: "
+                    "error_code=%s block_count=%d total_text_chars=%d "
+                    "max_block_chars=%d response_meta=%s",
+                    chunk_idx + 1,
+                    len(chunks),
+                    slack_error_code,
+                    len(chunk),
+                    sum(
+                        len(b.get("text", {}).get("text", ""))
+                        for b in chunk
+                        if isinstance(b.get("text"), dict)
+                    ),
+                    max(
+                        (
+                            len(b.get("text", {}).get("text", ""))
+                            for b in chunk
+                            if isinstance(b.get("text"), dict)
+                        ),
+                        default=0,
+                    ),
+                    response_meta,
+                )
                 # Don't keep retrying additional chunks if Slack is down.
                 break
     except Exception as e:  # noqa: BLE001 — render bug → swallow

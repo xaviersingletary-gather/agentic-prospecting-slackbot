@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from src.config import settings
 from src.integrations.edgar import EdgarClient
 from src.integrations.exa.client import ExaSearchClient
 from src.research.agents.contract import (
@@ -510,7 +511,10 @@ async def run(ctx: AgentContext) -> AgentResult:
         )
 
     edgar = ctx.edgar_client or EdgarClient()
-    exa = ctx.exa_client or ExaSearchClient(api_key=ctx.exa_api_key or "")
+    # Fall back through ctx.exa_api_key → settings.EXA_API_KEY → env var so
+    # production (which leaves ctx.exa_api_key unset) still picks up the key.
+    _exa_key = ctx.exa_api_key or settings.EXA_API_KEY
+    exa = ctx.exa_client or ExaSearchClient(api_key=_exa_key or "")
 
     claims: List[Claim] = []
 
