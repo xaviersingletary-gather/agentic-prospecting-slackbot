@@ -259,7 +259,8 @@ async def test_all_claims_round_trip_to_dict():
     assert serialized["agent_name"] == "agent_9_industry_pain"
     assert serialized["section_title"] == "Industry & Pain Matcher"
     assert isinstance(serialized["claims"], list)
-    assert len(serialized["claims"]) == 5
+    # 5 deterministic claims + 1 LLM-synthesized "Why this fits" claim.
+    assert len(serialized["claims"]) == 6
     for blob in serialized["claims"]:
         assert "text" in blob
         assert "source_tag" in blob

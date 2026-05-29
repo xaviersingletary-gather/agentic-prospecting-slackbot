@@ -45,6 +45,10 @@ from src.research.agents.contract import (
     Claim,
     SourceTag,
 )
+from src.research.agents.synthesis import (
+    build_grounding_stanza,
+    synthesize_with_fallback,
+)
 from src.security.exception_logger import safe_log_exception
 
 logger = logging.getLogger(__name__)
@@ -335,6 +339,17 @@ async def run(ctx: AgentContext) -> AgentResult:
 
         claims = _build_classification_claims(winner, anchor_url, hit_count)
 
+        # Phase 9 addition: synthesize a "Why this fits" paragraph that
+        # connects the generic table-driven pain mapping to specific
+        # evidence in THIS account's research. Falls back to a one-line
+        # deterministic claim on any synthesis failure.
+        why_claim = _build_why_this_fits_claim(
+            account_name=ctx.account_name,
+            profile=winner,
+            indexed_claims=indexed_claims,
+        )
+        claims.append(why_claim)
+
         return AgentResult(
             agent_name=AGENT_NAME,
             section_title=SECTION_TITLE,
@@ -526,6 +541,154 @@ def _build_classification_claims(
     )
 
     return claims
+
+
+def _top_matched_priors(
+    indexed_claims: List[Tuple[str, Optional[str]]],
+    profile: IndustryProfile,
+    limit: int = 3,
+) -> List[Tuple[str, str]]:
+    """Return up to `limit` (section_title_proxy, claim_text) tuples for
+    prior claims whose text contains a keyword from the winning profile.
+
+    We don't carry section_title down through `_flatten_claims`, so the
+    label here is a generic "prior_claim" placeholder; the user payload
+    only needs enough context to anchor the LLM to a specific quote.
+    Ordered by number of distinct keyword hits in the claim text
+    (descending), then by appearance order — deterministic.
+    """
+    scored: List[Tuple[int, int, str]] = []
+    for idx, (text, _url) in enumerate(indexed_claims):
+        lowered = text.lower()
+        hits = sum(1 for kw in profile.keywords if kw in lowered)
+        if hits > 0:
+            scored.append((hits, idx, text))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    out: List[Tuple[str, str]] = []
+    for _hits, _idx, text in scored[:limit]:
+        # Section label is a proxy — `_flatten_claims` drops the parent
+        # AgentResult identity. Use a stable placeholder so the prompt
+        # is still readable.
+        out.append(("prior_claim", text))
+    return out
+
+
+def _build_why_this_fits_system_prompt(profile: IndustryProfile) -> str:
+    """System prompt for the synthesis call.
+
+    Embeds the project-wide grounding stanza (anti-AI-tell vocabulary,
+    em-dash rule, no fabrication, no tools) and then the agent-specific
+    task: explain why THIS account's evidence maps to the standard pain
+    pattern for its classified industry.
+    """
+    role_description = (
+        f"You are an experienced Gather AI AE explaining why the "
+        f"{profile.industry}'s standard pain pattern fits THIS specific "
+        f"target account."
+    )
+    grounding = build_grounding_stanza(role_description=role_description)
+    task_stanza = (
+        f"\nClassified industry: {profile.industry}\n"
+        f"Primary pain: {profile.primary_pain}\n"
+        f"Secondary pain: {profile.secondary_pain}\n\n"
+        "Quote at least one specific fact from the matched prior claims. "
+        "Stay under 4 sentences. Write one short paragraph that connects "
+        "the generic pain pattern to the concrete evidence in this "
+        "account's research. Do not restate the pain labels verbatim; "
+        "explain why they apply here.\n"
+    )
+    return grounding + task_stanza
+
+
+def _build_why_this_fits_user_payload(
+    account_name: str,
+    profile: IndustryProfile,
+    top_priors: List[Tuple[str, str]],
+) -> str:
+    """Assemble the user-message payload for the synthesis call."""
+    lines = [
+        f"Account: {account_name}",
+        f"Classified industry: {profile.industry}",
+        f"Primary pain: {profile.primary_pain}",
+        f"Secondary pain: {profile.secondary_pain}",
+        "Evidence from research (top 3 most-matched prior claims):",
+    ]
+    if not top_priors:
+        lines.append("  - (no keyword-matched priors)")
+    else:
+        for section_title, claim_text in top_priors:
+            # Newlines inside a claim would confuse the bullet layout.
+            clean = " ".join(claim_text.split())
+            lines.append(f"  - [{section_title}] \"{clean}\"")
+    return "\n".join(lines)
+
+
+def _build_why_this_fits_claim(
+    account_name: str,
+    profile: IndustryProfile,
+    indexed_claims: List[Tuple[str, Optional[str]]],
+) -> Claim:
+    """Synthesize the "Why this fits" claim, with deterministic fallback.
+
+    Returns an INFERRED Claim either way. On synthesis failure the text
+    is a one-line generic fallback and `inference_logic` notes the
+    fallback path. On success, `inference_logic` lists the 2-3 prior
+    claim snippets that contributed.
+    """
+    top_priors = _top_matched_priors(indexed_claims, profile, limit=3)
+
+    system_prompt = _build_why_this_fits_system_prompt(profile)
+    user_payload = _build_why_this_fits_user_payload(
+        account_name=account_name,
+        profile=profile,
+        top_priors=top_priors,
+    )
+
+    fallback_text = (
+        f"{profile.industry} accounts typically face "
+        f"{profile.primary_pain}; see Primary pain claim above."
+    )
+
+    synthesized = synthesize_with_fallback(
+        system_prompt=system_prompt,
+        user_payload=user_payload,
+        fallback=fallback_text,
+        log_label="[agent_9.why_this_fits]",
+    )
+
+    text_for_claim = f"Why this fits: {synthesized}"
+
+    if synthesized == fallback_text:
+        inference_logic = (
+            "Synthesis failed; falling back to generic pain mapping."
+        )
+    else:
+        # List 2-3 prior claim snippets that contributed.
+        snippets = [_snippet(t) for _label, t in top_priors[:3]]
+        if snippets:
+            joined = "; ".join(f"\"{s}\"" for s in snippets)
+            inference_logic = (
+                f"LLM synthesis grounded in prior claims: {joined}"
+            )
+        else:
+            inference_logic = (
+                "LLM synthesis grounded in the classified industry's "
+                "pain mapping; no keyword-matched prior snippets to cite."
+            )
+
+    return Claim(
+        text=text_for_claim,
+        source_tag=SourceTag.INFERRED,
+        inference_logic=inference_logic,
+    )
+
+
+def _snippet(text: str, max_chars: int = 140) -> str:
+    """Compress a claim text into a short single-line snippet."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
 
 
 def _no_match_result(started: float, reason: str) -> AgentResult:

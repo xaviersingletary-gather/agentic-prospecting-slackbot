@@ -45,6 +45,10 @@ from src.research.agents.contract import (
     Claim,
     SourceTag,
 )
+from src.research.agents.synthesis import (
+    build_grounding_stanza,
+    synthesize_with_fallback,
+)
 from src.security.exception_logger import safe_log_exception
 
 logger = logging.getLogger(__name__)
@@ -200,9 +204,43 @@ PERSONA_LENSES: Dict[str, PersonaLens] = {
     ),
 }
 
+# Per-persona pitch-tone rules (verbatim from the SDR skill). These get
+# embedded in the per-persona system prompt so the LLM knows what tone
+# to write the 2-sentence angle in. Edits here must stay synchronized
+# with the SDR skill — the prompts are the contract.
+PERSONA_PITCH_TONES: Dict[str, str] = {
+    "TDM": (
+        "Lead with clean, fast integration — no middleware, 15-min "
+        "config, no infrastructure changes. Defuse implementation "
+        "fear. Never lead with ROI."
+    ),
+    "ODM": (
+        "Lead with operational friction — cycle counts, floor "
+        "visibility, shift-level pain. Never pitch ROI."
+    ),
+    "FS": (
+        "Lead with business outcome — payback period, labor "
+        "reduction, network visibility. Never describe the technology."
+    ),
+    "IT": (
+        "Lead with security and integration risk mitigation — "
+        "ISO 27001, on-prem option, data flow safety."
+    ),
+    "Safety": (
+        "Lead with safety and certification — drones capture only "
+        "pallets and labels. Never lead with efficiency."
+    ),
+}
+
 # Hard caps so a misbehaving upstream agent can't blow out a Slack block.
 SNIPPET_MAX = 180
 LENS_MAX = 220
+SYNTH_TEXT_MAX = 480
+
+# Sentinel value to detect the "synthesis returned the fallback string"
+# case — when this happens we know the LLM call failed and we should
+# emit the deterministic template, not the synthesized prose.
+_SYNTH_FALLBACK_SENTINEL = "__AGENT7_SYNTH_FALLBACK__"
 
 
 @dataclass
@@ -258,7 +296,12 @@ async def run(ctx: AgentContext) -> AgentResult:
 
         claims: List[Claim] = []
         for persona_key in PERSONA_ORDER:
-            persona_claim = _build_persona_claim(persona_key, usable_claims)
+            persona_claim = _build_persona_claim(
+                persona_key,
+                usable_claims,
+                account_name=ctx.account_name,
+                intent=ctx.intent,
+            )
             claims.append(persona_claim)
 
         return AgentResult(
@@ -360,11 +403,79 @@ def _truncate(text: str, cap: int) -> str:
     return text[: cap - 1].rstrip() + "…"
 
 
+def _build_system_prompt(persona_key: str) -> str:
+    """Compose the per-persona system prompt for the LLM synthesis call.
+
+    Includes:
+      - the shared grounding stanza (anti-AI-tell vocabulary, no
+        em-dashes, no fabrication, no tools) from `synthesis.py`
+      - the persona's pitch-tone rule verbatim from the SDR skill
+      - the 2-sentence shape rule (angle + discovery question)
+    """
+    label = PERSONA_LABELS[persona_key]
+    pitch_tone = PERSONA_PITCH_TONES[persona_key]
+
+    role_description = (
+        f"You are an experienced Gather AI AE writing one short sales "
+        f"angle for the {label} ({persona_key}) persona."
+    )
+    grounding = build_grounding_stanza(role_description=role_description)
+
+    return (
+        f"{grounding}\n"
+        f"Persona pitch tone (follow exactly): {pitch_tone}\n\n"
+        "Output exactly 2 sentences. The first names the angle to lead "
+        "with, grounded in the matched prior claim. The second is a "
+        "concrete discovery question the rep should ask in a call. "
+        "Do not restate the persona name or label. Do not add bullet "
+        "points or headers. Return only the two sentences."
+    )
+
+
+def _build_user_payload(
+    *,
+    account_name: str,
+    intent: Optional[str],
+    section_title: str,
+    anchor_text: str,
+) -> str:
+    intent_label = (intent or "general research").strip() or "general research"
+    return (
+        f"Account: {account_name}\n"
+        f"Intent: {intent_label}\n"
+        f"Matched prior claim ({section_title}): \"{anchor_text}\""
+    )
+
+
+def _section_title_for_claim(
+    claim: Claim,
+    usable_claims: List[Claim],
+    prior_results_by_claim: Optional[Dict[int, str]] = None,
+) -> str:
+    """Best-effort label for which section the matched claim came from.
+
+    We don't have a back-reference from Claim to AgentResult, so fall
+    back to a generic phrase. The LLM only uses this for context; it's
+    never load-bearing for correctness.
+    """
+    return "prior research"
+
+
 def _build_persona_claim(
     persona_key: str,
     usable_claims: List[Claim],
+    *,
+    account_name: str,
+    intent: Optional[str],
 ) -> Claim:
-    """Pick the strongest prior claims for this persona and frame them."""
+    """Pick the strongest prior claims for this persona and frame them.
+
+    V1.1 (May 29): after the keyword match picks the anchor claim, we
+    hand the anchor to an LLM via `synthesize_with_fallback` to produce
+    a 2-sentence persona-aware sales angle plus a discovery question.
+    If the synthesis call fails for any reason, we fall back to the
+    deterministic template so the persona output is never dropped.
+    """
     lens = PERSONA_LENSES[persona_key]
     label = PERSONA_LABELS[persona_key]
 
@@ -390,10 +501,13 @@ def _build_persona_claim(
     snippets = [_truncate(c.text, SNIPPET_MAX) for c, _ in top]
     snippet_blob = " | ".join(snippets)
     lens_line = _truncate(lens.lens, LENS_MAX)
+    anchor_text = snippets[0]
 
-    text = (
+    # Deterministic template — used as the synthesis fallback so a
+    # failed LLM call never drops the persona angle.
+    deterministic_text = (
         f"{label} ({persona_key}) angle: {lens_line} "
-        f"Anchor: \"{snippets[0]}\""
+        f"Anchor: \"{anchor_text}\""
     )
 
     inference_logic = (
@@ -402,8 +516,36 @@ def _build_persona_claim(
         f"Source snippet(s): {snippet_blob}"
     )
 
+    # Call the shared LLM helper. The sentinel lets us distinguish a
+    # successful synthesis from a fallback so we can decide whether to
+    # prepend the persona-key prefix to keep downstream parsing stable.
+    system_prompt = _build_system_prompt(persona_key)
+    user_payload = _build_user_payload(
+        account_name=account_name,
+        intent=intent,
+        section_title=_section_title_for_claim(top[0][0], usable_claims),
+        anchor_text=anchor_text,
+    )
+
+    synth_out = synthesize_with_fallback(
+        system_prompt=system_prompt,
+        user_payload=user_payload,
+        fallback=_SYNTH_FALLBACK_SENTINEL,
+        log_label=f"[agent_7][{persona_key}]",
+    )
+
+    if synth_out == _SYNTH_FALLBACK_SENTINEL or not synth_out.strip():
+        # LLM unavailable / failed — fall back to the deterministic
+        # template so the persona output is preserved.
+        text = deterministic_text
+    else:
+        # Successful synthesis. Prepend the persona-key prefix so
+        # downstream tests / renderers can still locate the persona in
+        # the claim text. The synthesized prose follows the colon.
+        text = f"{label} ({persona_key}): {synth_out.strip()}"
+
     return Claim(
-        text=_truncate(text, 480),
+        text=_truncate(text, SYNTH_TEXT_MAX),
         source_tag=SourceTag.INFERRED,
         inference_logic=_truncate(inference_logic, 800),
     )
