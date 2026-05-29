@@ -91,6 +91,7 @@ Use `worker` not `web` — this app has no HTTP server, it connects to Slack via
 - **Tests must pass before moving to the next phase** — follow `docs/account-research-bot-spec.md` phase order; do not start Phase N+1 until Phase N acceptance criteria pass
 - **Log every API call with latency** — format: `[API] exa.search — 1240ms`
 - **Acknowledge Slack interactions within 3 seconds** — use `ack()` immediately, defer all heavy processing async
+- **Always `git diff <file>` before `git add <file>` in this repo** — Xavier runs multiple Claude sessions / tools editing the same working tree. Even `git add <specific-file>` sweeps in another agent's uncommitted hunks. On 2026-05-29 this shipped a `NameError` to production (`renderer.py` called `_humanize_date()` while the helper definition was still uncommitted in a sibling agent's edit). If `git status` lists files you didn't touch, stop and flag it to the user before committing.
 
 ---
 
